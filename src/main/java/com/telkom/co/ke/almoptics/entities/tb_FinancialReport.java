@@ -1,278 +1,292 @@
-/*
- * Click nbfs://nbhost/SystemFileSystem/Templates/Licenses/license-default.txt to change this license
- * Click nbfs://nbhost/SystemFileSystem/Templates/Classes/Class.java to edit this template
- */
 package com.telkom.co.ke.almoptics.entities;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import javax.persistence.*;
 import java.io.Serializable;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.Date;
-import javax.persistence.Column;
-import javax.persistence.Entity;
-import javax.persistence.GeneratedValue;
-import javax.persistence.GenerationType;
-import javax.persistence.Id;
-import javax.persistence.Index;
-import javax.persistence.PrePersist;
-import javax.persistence.Table;
-import javax.persistence.Temporal;
 
-/**
- *
- * @author jgithu
- */
 @Entity
 @Table(name = "`tb_FinancialReport`", indexes = {
-    @Index(name = "PRIMARY", columnList = "recordNo", unique = false)})
+        @Index(name = "PRIMARY", columnList = "Id", unique = true)})
 public class tb_FinancialReport implements Serializable {
+
+    private static final long serialVersionUID = 1L;
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
-    @Column(name = "recordNo")
-    private int recordNo;
+    @Column(name = "Id")
+    private Long id;
 
-    @Column(name = "recordDatetime")
-    // @Temporal(javax.persistence.TemporalType.DATE)
-    private Date recordDatetime;
+    @Column(name = "SiteID")
+    @JsonProperty("siteID")
+    private String siteId;
 
-    @Column(name = "serialNumber")
-    private String serialNumber;
+    @Column(name = "Zone")
+    @JsonProperty("zone")
+    private String zone;
 
-    @Column(name = "rfid")
-    private String rfid;
-
-    @Column(name = "tag")
-    private String tag;
-
-    @Column(name = "assetId")
-    private String assetId;
-
-    @Column(name = "assetType")
-    private String assetType;
-    @Column(name = "nodeType")
+    @Column(name = "NodeType")
+    @JsonProperty("nodeType")
     private String nodeType;
 
-    @Column(name = "installationDate")
-    // @Temporal(javax.persistence.TemporalType.DATE)
-    private Date installationDate;
+    @Column(name = "AssetName")
+    @JsonProperty("assetName")
+    private String assetName;
 
-    @Column(name = "initialCost")
-    private double initialCost;
+    @Column(name = "AssetType")
+    @JsonProperty("assetType")
+    private String assetType;
 
-    @Column(name = "salvageValue")
-    private double salvageValue;
+    @Column(name = "AssetCategory")
+    @JsonProperty("assetCategory")
+    private String assetCategory;
 
-    @Column(name = "poNumber")
+    @Column(name = "Model")
+    @JsonProperty("model")
+    private String model;
+
+    @Column(name = "PartNumber")
+    @JsonProperty("partNumber")
+    private String partNumber;
+
+    @Column(name = "AssetSerialNumber")
+    @JsonProperty("assetSerialNumber")
+    private String assetSerialNumber;
+
+    @Column(name = "InstallationDate")
+    @JsonProperty("installationDate")
+    private String installationDate;
+
+    @Column(name = "InitialCost", precision = 15, scale = 3)
+    @JsonProperty("initialCost")
+    private BigDecimal initialCost;
+
+    @Column(name = "MonthlyDepreciationAmount", precision = 15, scale = 3)
+    @JsonProperty("monthlyDepreciationAmount")
+    private BigDecimal monthlyDepreciationAmount;
+
+    @Column(name = "AccumulatedDepreciation", precision = 15, scale = 3)
+    @JsonProperty("accumulatedDepreciation")
+    private BigDecimal accumulatedDepreciation;
+
+    @Column(name = "NetCost", precision = 15, scale = 3)
+    @JsonProperty("netCost")
+    private BigDecimal netCost;
+
+    @Column(name = "SalvageValue", precision = 15, scale = 3)
+    @JsonProperty("salvageValue")
+    private BigDecimal salvageValue;
+
+    @Column(name = "PONumber")
+    @JsonProperty("poNumber")
     private String poNumber;
 
-    @Column(name = "poDate")
-//    @Temporal(javax.persistence.TemporalType.DATE)
-    private Date poDate;
+    @Column(name = "PODate")
+    @JsonProperty("poDate")
+    private String poDate;
 
-    @Column(name = "newFACategory")
-    private String newFACategory;
+    @Column(name = "`FA_CATEGORY(NEW)`")
+    @JsonProperty("FA_CATEGORY")
+    private String faCategory;
 
-    @Column(name = "L1")
-    private String L1;
+    @Column(name = "`L1(NEW)`")
+    @JsonProperty("l1")
+    private String l1;
 
-    @Column(name = "L2")
-    private String L2;
-    @Column(name = "L3")
-    private String L3;
-    @Column(name = "L4")
-    private String L4;
+    @Column(name = "`L2(NEW)`")
+    @JsonProperty("l2")
+    private String l2;
 
-    @Column(name = "accDepreciationCode")
-    private String accDepreciationCode;
-    @Column(name = "depreciationCode")
+    @Column(name = "`L3(NEW)`")
+    @JsonProperty("l3")
+    private String l3;
+
+    @Column(name = "`L4(NEW)`")
+    @JsonProperty("l4")
+    private String l4;
+
+    @Column(name = "AccumulatedDepreciationCode")
+    @JsonProperty("accumulatedDepreciationCode")
+    private String accumulatedDepreciationCode;
+
+    @Column(name = "DepreciationCode")
+    @JsonProperty("depreciationCode")
     private String depreciationCode;
 
-    @Column(name = "userfulLife")
-    private Integer userfulLife;
+    @Column(name = "`UsefulLife(Months)`")
+    @JsonProperty("usefulLifeMonths")
+    private Integer usefulLifeMonths;
 
-    @Column(name = "vendorName")
+    @Column(name = "VENDOR_NAME")
+    @JsonProperty("vendorName")
     private String vendorName;
 
-    @Column(name = "vendorNumber")
+    @Column(name = "VENDOR_NUMBER")
+    @JsonProperty("vendorNumber")
     private String vendorNumber;
 
-    @Column(name = "projectNumber")
+    @Column(name = "PROJECT_NUMBER")
+    @JsonProperty("projectNumber")
     private String projectNumber;
 
-    @Column(name = "dateOfService")
-    private Date dateOfService;
-    @Column(name = "oldFACategory")
-    private String oldFACategory;
+    @Column(name = "Description", columnDefinition = "text")
+    @JsonProperty("description")
+    private String description;
 
-    @Column(name = "costCenter")
-    private String costCenter;
+    @Column(name = "OracleAssetID")
+    @JsonProperty("oracleAssetID")
+    private String oracleAssetId;
 
-    @Column(name = "adjustment")
-    private double adjustment;
+    @Column(name = "DateOfService")
+    @JsonProperty("dateOfService")
+    private String dateOfService;
 
-    @Column(name = "invoiceNumber")
-    private String invoiceNumber;
-    @Column(name = "taskId")
+    @Column(name = "InsertDate")
+    @Temporal(TemporalType.TIMESTAMP)
+    @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+    @JsonProperty("insertDate")
+    private Date insertDate;
+
+    @Column(name = "InsertedBy")
+    @JsonProperty("insertedBy")
+    private String insertedBy;
+
+    @Column(name = "ChangeDate")
+    @Temporal(TemporalType.TIMESTAMP)
+    @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+    @JsonProperty("changeDate")
+    private Date changeDate;
+
+    @Column(name = "ChangedBy")
+    @JsonProperty("changedBy")
+    private String changedBy;
+
+    @Column(name = "StatusFlag")
+    @JsonProperty("statusFlag")
+    private String statusFlag;
+
+    @Column(name = "TechnologySupported")
+    @JsonProperty("technologySupported")
+    private String technologySupported;
+
+    @Column(name = "RetirementDate")
+    @Temporal(TemporalType.TIMESTAMP)
+    @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+    @JsonProperty("retirementDate")
+    private Date retirementDate;
+
+    @Column(name = "OLDFARcategory")
+    @JsonProperty("OLDFARcategory")
+    private String oldFarCategory;
+
+    @Column(name = "CostCenterData")
+    @JsonProperty("costCenterData")
+    private String costCenterData;
+
+    @Column(name = "FinancialApprovalStatus")
+    @JsonProperty("financialApprovalStatus")
+    private String financialApprovalStatus;
+
+    @Column(name = "NEPAssetID")
+    @JsonProperty("nepAssetID")
+    private String nepAssetId;
+
+    @Column(name = "Deleted")
+    @JsonProperty("deleted")
+    private Boolean deleted;
+
+    @Column(name = "Adjustment", precision = 15, scale = 3)
+    @JsonProperty("adjustment")
+    private BigDecimal adjustment;
+
+    @Column(name = "WriteOffDate")
+    @Temporal(TemporalType.TIMESTAMP)
+    @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+    @JsonProperty("writeOffDate")
+    private Date writeOffDate;
+
+    @Column(name = "TAG")
+    @JsonProperty("tag")
+    private String tag;
+
+    @Column(name = "HostSerialNumber")
+    @JsonProperty("hostSerialNumber")
+    private String hostSerialNumber;
+
+    @Column(name = "TaskId")
+    @JsonProperty("taskId")
     private String taskId;
 
-    @Column(name = "poLineNumber")
+    @Column(name = "PoLineNumber")
+    @JsonProperty("poLineNumber")
     private String poLineNumber;
 
-    @Column(name = "monthlyDepreciationAmt")
-    private Double  monthlyDepreciationAmt;
+    @Column(name = "ReleaseNumber")
+    @JsonProperty("releaseNumber")
+    private String releaseNumber;
 
-    @Column(name = "accumulatedDepreciationAmt")
-    private Double  accumulatedDepreciationAmt;
+    @Column(name = "SpectrumLicenseDate")
+    @Temporal(TemporalType.TIMESTAMP)
+    @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+    @JsonProperty("spectrumLicenseDate")
+    private Date spectrumLicenseDate;
 
-    @Column(name = "approvalStatus")
-    private String approvalStatus;
+    @Column(name = "ItemBarCode")
+    @JsonProperty("itemBarCode")
+    private String itemBarCode;
 
-    @Column(name = "depreciationDate")
-    private Date depreciationDate;
+    @Column(name = "RFID", nullable = true)
+    @JsonProperty("rfid")
+    private String rfid;
 
-    @Column(name = "netCost")
-    private Double  netCost;
+    @Column(name = "InvoiceNumber", nullable = true)
+    @JsonProperty("invoiceNumber")
+    private String invoiceNumber;
 
+    @Column(name = "OriginalState", columnDefinition = "TEXT")
+    @JsonProperty("originalState")
+    private String originalState;
+
+    @Version
+    @Column(name = "Version")
+    private Long version;
+
+    // Constructor
     public tb_FinancialReport() {
     }
 
-//    public tb_FinancialReport(int recordNo, Date recordDatetime, String serialNumber, String rfid, String tag, String assetId, String assetType, String nodeType, Date installationDate, double initialCost, double salvageValue, String poNumber, Date poDate, String newFACategory, String L1, String L2, String L3, String L4, String accDepreciationCode, String depreciationCode, Integer userfulLife, String vendorName, String vendorNumber, String projectNumber, Date dateOfService, String oldFACategory, String costCenter, boolean adjustment, String invoiceNumber, String taskId, String poLineNumber) {
-//        this.recordNo = recordNo;
-//        this.recordDatetime = recordDatetime;
-//        this.serialNumber = serialNumber;
-//        this.rfid = rfid;
-//        this.tag = tag;
-//        this.assetId = assetId;
-//        this.assetType = assetType;
-//        this.nodeType = nodeType;
-//        this.installationDate = installationDate;
-//        this.initialCost = initialCost;
-//        this.salvageValue = salvageValue;
-//        this.poNumber = poNumber;
-//        this.poDate = poDate;
-//        this.newFACategory = newFACategory;
-//        this.L1 = L1;
-//        this.L2 = L2;
-//        this.L3 = L3;
-//        this.L4 = L4;
-//        this.accDepreciationCode = accDepreciationCode;
-//        this.depreciationCode = depreciationCode;
-//        this.userfulLife = userfulLife;
-//        this.vendorName = vendorName;
-//        this.vendorNumber = vendorNumber;
-//        this.projectNumber = projectNumber;
-//        this.dateOfService = dateOfService;
-//        this.oldFACategory = oldFACategory;
-//        this.costCenter = costCenter;
-//        this.adjustment = adjustment;
-//        this.invoiceNumber = invoiceNumber;
-//        this.taskId = taskId;
-//        this.poLineNumber = poLineNumber;
-//    }
-    public int getRecordNo() {
-        return recordNo;
-    }
-
+    // PrePersist to automatically set insertDate
     @PrePersist
     protected void onCreate() {
-
-        this.recordDatetime = new Date();
-
+        this.insertDate = new Date();
     }
 
-    public Double  getMonthlyDepreciationAmt() {
-        
-          return monthlyDepreciationAmt != null ? monthlyDepreciationAmt : 0.0;
-       // return monthlyDepreciationAmt;
+    // Getters and Setters
+    public Long getId() {
+        return id;
     }
 
-    public void setMonthlyDepreciationAmt(double monthlyDepreciationAmt) {
-        this.monthlyDepreciationAmt = monthlyDepreciationAmt;
+    public void setId(Long id) {
+        this.id = id;
     }
 
-    public Double  getAccumulatedDepreciationAmt() {
-          return accumulatedDepreciationAmt != null ? accumulatedDepreciationAmt : 0.0;
-      //  return accumulatedDepreciationAmt;
+    public String getSiteId() {
+        return siteId;
     }
 
-    public void setAccumulatedDepreciationAmt(double accumulatedDepreciationAmt) {
-        this.accumulatedDepreciationAmt = accumulatedDepreciationAmt;
+    public void setSiteId(String siteId) {
+        this.siteId = siteId;
     }
 
-    public String getApprovalStatus() {
-        return approvalStatus;
+    public String getZone() {
+        return zone;
     }
 
-    public void setApprovalStatus(String approvalStatus) {
-        this.approvalStatus = approvalStatus;
-    }
-
-    public Date getDepreciationDate() {
-        return depreciationDate;
-    }
-
-    public void setDepreciationDate(Date depreciationDate) {
-        this.depreciationDate = depreciationDate;
-    }
-
-    public Double getNetCost() {
-         return netCost != null ? netCost : 0.0;
-       // return netCost;
-    }
-
-    public void setNetCost(double netCost) {
-        this.netCost = netCost;
-    }
-
-    public void setRecordNo(int recordNo) {
-        this.recordNo = recordNo;
-    }
-
-    public Date getRecordDatetime() {
-        return recordDatetime;
-    }
-
-    public void setRecordDatetime(Date recordDatetime) {
-        this.recordDatetime = recordDatetime;
-    }
-
-    public String getSerialNumber() {
-        return serialNumber;
-    }
-
-    public void setSerialNumber(String serialNumber) {
-        this.serialNumber = serialNumber;
-    }
-
-    public String getRfid() {
-        return rfid;
-    }
-
-    public void setRfid(String rfid) {
-        this.rfid = rfid;
-    }
-
-    public String getTag() {
-        return tag;
-    }
-
-    public void setTag(String tag) {
-        this.tag = tag;
-    }
-
-    public String getAssetId() {
-        return assetId;
-    }
-
-    public void setAssetId(String assetId) {
-        this.assetId = assetId;
-    }
-
-    public String getAssetType() {
-        return assetType;
-    }
-
-    public void setAssetType(String assetType) {
-        this.assetType = assetType;
+    public void setZone(String zone) {
+        this.zone = zone;
     }
 
     public String getNodeType() {
@@ -283,28 +297,102 @@ public class tb_FinancialReport implements Serializable {
         this.nodeType = nodeType;
     }
 
-    public Date getInstallationDate() {
+    public String getAssetName() {
+        return assetName;
+    }
+
+    public void setAssetName(String assetName) {
+        this.assetName = assetName;
+    }
+
+    public String getAssetType() {
+        return assetType;
+    }
+
+    public void setAssetType(String assetType) {
+        this.assetType = assetType;
+    }
+
+    public String getAssetCategory() {
+        return assetCategory;
+    }
+
+    public void setAssetCategory(String assetCategory) {
+        this.assetCategory = assetCategory;
+    }
+
+    public String getModel() {
+        return model;
+    }
+
+    public void setModel(String model) {
+        this.model = model;
+    }
+
+    public String getPartNumber() {
+        return partNumber;
+    }
+
+    public void setPartNumber(String partNumber) {
+        this.partNumber = partNumber;
+    }
+
+    public String getAssetSerialNumber() {
+        return assetSerialNumber;
+    }
+
+    public void setAssetSerialNumber(String assetSerialNumber) {
+        this.assetSerialNumber = assetSerialNumber;
+    }
+
+    public String getInstallationDate() {
         return installationDate;
     }
 
-    public void setInstallationDate(Date installationDate) {
+    public void setInstallationDate(String installationDate) {
         this.installationDate = installationDate;
     }
 
-    public double getInitialCost() {
-        return initialCost;
+    public BigDecimal getInitialCost() {
+        return initialCost != null ? initialCost.setScale(3, RoundingMode.HALF_UP) : BigDecimal.ZERO;
     }
 
-    public void setInitialCost(double initialCost) {
-        this.initialCost = initialCost;
+    public void setInitialCost(BigDecimal initialCost) {
+        this.initialCost = initialCost != null ? initialCost.setScale(3, RoundingMode.HALF_UP) : null;
     }
 
-    public double getSalvageValue() {
-        return salvageValue;
+    public BigDecimal getMonthlyDepreciationAmount() {
+        return monthlyDepreciationAmount != null ? monthlyDepreciationAmount.setScale(3, RoundingMode.HALF_UP) : BigDecimal.ZERO;
     }
 
-    public void setSalvageValue(double salvageValue) {
-        this.salvageValue = salvageValue;
+    public void setMonthlyDepreciationAmount(BigDecimal monthlyDepreciationAmount) {
+        this.monthlyDepreciationAmount = monthlyDepreciationAmount != null ?
+                monthlyDepreciationAmount.setScale(3, RoundingMode.HALF_UP) : null;
+    }
+
+    public BigDecimal getAccumulatedDepreciation() {
+        return accumulatedDepreciation != null ? accumulatedDepreciation.setScale(3, RoundingMode.HALF_UP) : BigDecimal.ZERO;
+    }
+
+    public void setAccumulatedDepreciation(BigDecimal accumulatedDepreciation) {
+        this.accumulatedDepreciation = accumulatedDepreciation != null ?
+                accumulatedDepreciation.setScale(3, RoundingMode.HALF_UP) : null;
+    }
+
+    public BigDecimal getNetCost() {
+        return netCost != null ? netCost.setScale(3, RoundingMode.HALF_UP) : BigDecimal.ZERO;
+    }
+
+    public void setNetCost(BigDecimal netCost) {
+        this.netCost = netCost != null ? netCost.setScale(3, RoundingMode.HALF_UP) : null;
+    }
+
+    public BigDecimal getSalvageValue() {
+        return salvageValue != null ? salvageValue.setScale(3, RoundingMode.HALF_UP) : BigDecimal.ZERO;
+    }
+
+    public void setSalvageValue(BigDecimal salvageValue) {
+        this.salvageValue = salvageValue != null ? salvageValue.setScale(3, RoundingMode.HALF_UP) : null;
     }
 
     public String getPoNumber() {
@@ -315,60 +403,60 @@ public class tb_FinancialReport implements Serializable {
         this.poNumber = poNumber;
     }
 
-    public Date getPoDate() {
+    public String getPoDate() {
         return poDate;
     }
 
-    public void setPoDate(Date poDate) {
+    public void setPoDate(String poDate) {
         this.poDate = poDate;
     }
 
-    public String getNewFACategory() {
-        return newFACategory;
+    public String getFaCategory() {
+        return faCategory;
     }
 
-    public void setNewFACategory(String newFACategory) {
-        this.newFACategory = newFACategory;
+    public void setFaCategory(String faCategory) {
+        this.faCategory = faCategory;
     }
 
     public String getL1() {
-        return L1;
+        return l1;
     }
 
-    public void setL1(String L1) {
-        this.L1 = L1;
+    public void setL1(String l1) {
+        this.l1 = l1;
     }
 
     public String getL2() {
-        return L2;
+        return l2;
     }
 
-    public void setL2(String L2) {
-        this.L2 = L2;
+    public void setL2(String l2) {
+        this.l2 = l2;
     }
 
     public String getL3() {
-        return L3;
+        return l3;
     }
 
-    public void setL3(String L3) {
-        this.L3 = L3;
+    public void setL3(String l3) {
+        this.l3 = l3;
     }
 
     public String getL4() {
-        return L4;
+        return l4;
     }
 
-    public void setL4(String L4) {
-        this.L4 = L4;
+    public void setL4(String l4) {
+        this.l4 = l4;
     }
 
-    public String getAccDepreciationCode() {
-        return accDepreciationCode;
+    public String getAccumulatedDepreciationCode() {
+        return accumulatedDepreciationCode;
     }
 
-    public void setAccDepreciationCode(String accDepreciationCode) {
-        this.accDepreciationCode = accDepreciationCode;
+    public void setAccumulatedDepreciationCode(String accumulatedDepreciationCode) {
+        this.accumulatedDepreciationCode = accumulatedDepreciationCode;
     }
 
     public String getDepreciationCode() {
@@ -379,12 +467,12 @@ public class tb_FinancialReport implements Serializable {
         this.depreciationCode = depreciationCode;
     }
 
-    public Integer getUserfulLife() {
-        return userfulLife;
+    public Integer getUsefulLifeMonths() {
+        return usefulLifeMonths;
     }
 
-    public void setUserfulLife(Integer userfulLife) {
-        this.userfulLife = userfulLife;
+    public void setUsefulLifeMonths(Integer usefulLifeMonths) {
+        this.usefulLifeMonths = usefulLifeMonths;
     }
 
     public String getVendorName() {
@@ -411,44 +499,156 @@ public class tb_FinancialReport implements Serializable {
         this.projectNumber = projectNumber;
     }
 
-    public Date getDateOfService() {
+    public String getDescription() {
+        return description;
+    }
+
+    public void setDescription(String description) {
+        this.description = description;
+    }
+
+    public String getOracleAssetId() {
+        return oracleAssetId;
+    }
+
+    public void setOracleAssetId(String oracleAssetId) {
+        this.oracleAssetId = oracleAssetId;
+    }
+
+    public String getDateOfService() {
         return dateOfService;
     }
 
-    public void setDateOfService(Date dateOfService) {
+    public void setDateOfService(String dateOfService) {
         this.dateOfService = dateOfService;
     }
 
-    public String getOldFACategory() {
-        return oldFACategory;
+    public Date getInsertDate() {
+        return insertDate;
     }
 
-    public void setOldFACategory(String oldFACategory) {
-        this.oldFACategory = oldFACategory;
+    public void setInsertDate(Date insertDate) {
+        this.insertDate = insertDate;
     }
 
-    public String getCostCenter() {
-        return costCenter;
+    public String getInsertedBy() {
+        return insertedBy;
     }
 
-    public void setCostCenter(String costCenter) {
-        this.costCenter = costCenter;
+    public void setInsertedBy(String insertedBy) {
+        this.insertedBy = insertedBy;
     }
 
-    public double getAdjustment() {
-        return adjustment;
+    public Date getChangeDate() {
+        return changeDate;
     }
 
-    public void setAdjustment(double adjustment) {
-        this.adjustment = adjustment;
+    public void setChangeDate(Date changeDate) {
+        this.changeDate = changeDate;
     }
 
-    public String getInvoiceNumber() {
-        return invoiceNumber;
+    public String getChangedBy() {
+        return changedBy;
     }
 
-    public void setInvoiceNumber(String invoiceNumber) {
-        this.invoiceNumber = invoiceNumber;
+    public void setChangedBy(String changedBy) {
+        this.changedBy = changedBy;
+    }
+
+    public String getStatusFlag() {
+        return statusFlag;
+    }
+
+    public void setStatusFlag(String statusFlag) {
+        this.statusFlag = statusFlag;
+    }
+
+    public String getTechnologySupported() {
+        return technologySupported;
+    }
+
+    public void setTechnologySupported(String technologySupported) {
+        this.technologySupported = technologySupported;
+    }
+
+    public Date getRetirementDate() {
+        return retirementDate;
+    }
+
+    public void setRetirementDate(Date retirementDate) {
+        this.retirementDate = retirementDate;
+    }
+
+    public String getOldFarCategory() {
+        return oldFarCategory;
+    }
+
+    public void setOldFarCategory(String oldFarCategory) {
+        this.oldFarCategory = oldFarCategory;
+    }
+
+    public String getCostCenterData() {
+        return costCenterData;
+    }
+
+    public void setCostCenterData(String costCenterData) {
+        this.costCenterData = costCenterData;
+    }
+
+    public String getFinancialApprovalStatus() {
+        return financialApprovalStatus;
+    }
+
+    public void setFinancialApprovalStatus(String financialApprovalStatus) {
+        this.financialApprovalStatus = financialApprovalStatus;
+    }
+
+    public String getNepAssetId() {
+        return nepAssetId;
+    }
+
+    public void setNepAssetId(String nepAssetId) {
+        this.nepAssetId = nepAssetId;
+    }
+
+    public Boolean getDeleted() {
+        return deleted;
+    }
+
+    public void setDeleted(Boolean deleted) {
+        this.deleted = deleted;
+    }
+
+    public BigDecimal getAdjustment() {
+        return adjustment != null ? adjustment.setScale(3, RoundingMode.HALF_UP) : BigDecimal.ZERO;
+    }
+
+    public void setAdjustment(BigDecimal adjustment) {
+        this.adjustment = adjustment != null ? adjustment.setScale(3, RoundingMode.HALF_UP) : null;
+    }
+
+    public Date getWriteOffDate() {
+        return writeOffDate;
+    }
+
+    public void setWriteOffDate(Date writeOffDate) {
+        this.writeOffDate = writeOffDate;
+    }
+
+    public String getTag() {
+        return tag;
+    }
+
+    public void setTag(String tag) {
+        this.tag = tag;
+    }
+
+    public String getHostSerialNumber() {
+        return hostSerialNumber;
+    }
+
+    public void setHostSerialNumber(String hostSerialNumber) {
+        this.hostSerialNumber = hostSerialNumber;
     }
 
     public String getTaskId() {
@@ -467,4 +667,84 @@ public class tb_FinancialReport implements Serializable {
         this.poLineNumber = poLineNumber;
     }
 
+    public String getReleaseNumber() {
+        return releaseNumber;
+    }
+
+    public void setReleaseNumber(String releaseNumber) {
+        this.releaseNumber = releaseNumber;
+    }
+
+    public Date getSpectrumLicenseDate() {
+        return spectrumLicenseDate;
+    }
+
+    public void setSpectrumLicenseDate(Date spectrumLicenseDate) {
+        this.spectrumLicenseDate = spectrumLicenseDate;
+    }
+
+    public String getItemBarCode() {
+        return itemBarCode;
+    }
+
+    public void setItemBarCode(String itemBarCode) {
+        this.itemBarCode = itemBarCode;
+    }
+
+    public String getRfid() {
+        return rfid;
+    }
+
+    public void setRfid(String rfid) {
+        this.rfid = rfid;
+    }
+
+    public String getInvoiceNumber() {
+        return invoiceNumber;
+    }
+
+    public void setInvoiceNumber(String invoiceNumber) {
+        this.invoiceNumber = invoiceNumber;
+    }
+
+    public String getOriginalState() {
+        return originalState;
+    }
+
+    public void setOriginalState(String originalState) {
+        this.originalState = originalState;
+    }
+
+    public Long getVersion() {
+        return version;
+    }
+
+    public void setVersion(Long version) {
+        this.version = version;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+
+        tb_FinancialReport that = (tb_FinancialReport) o;
+        return id != null && id.equals(that.id);
+    }
+
+    @Override
+    public int hashCode() {
+        return id != null ? id.hashCode() : 0;
+    }
+
+    @Override
+    public String toString() {
+        return "FinancialReport{" +
+                "id=" + id +
+                ", assetName='" + assetName + '\'' +
+                ", assetSerialNumber='" + assetSerialNumber + '\'' +
+                ", assetType='" + assetType + '\'' +
+                ", oracleAssetId='" + oracleAssetId + '\'' +
+                '}';
+    }
 }

@@ -1,7 +1,3 @@
-/*
- * Click nbfs://nbhost/SystemFileSystem/Templates/Licenses/license-default.txt to change this license
- * Click nbfs://nbhost/SystemFileSystem/Templates/Classes/Class.java to edit this template
- */
 package com.telkom.co.ke.almoptics.controllers;
 
 import com.google.gson.JsonObject;
@@ -29,13 +25,7 @@ import java.time.LocalDateTime;
 import java.time.Period;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.Calendar;
-import java.util.Date;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.servlet.http.HttpServletResponse;
 import net.minidev.json.JSONArray;
@@ -98,72 +88,6 @@ public class AlmAssetManagementController {
 
     }
 
-//    @PostMapping(value = "getFAR", produces = "application/json")
-//    @CrossOrigin(origins = "*", allowedHeaders = "*", maxAge = 3600)
-//    public void getFARKSA(@RequestBody JSONObject assetRequest, HttpServletResponse response) throws IOException {
-//        String status = assetRequest.getAsString("assetId");
-//        this.LOGGER.info("GET ALL ASSETS " + assetRequest);
-//        this.LOGGER.info("Asset ID  " + status);
-//
-//        // Set default page size
-//        int size = 50000; // Number of records per chunk
-//        int page = 1; // Start from the first page
-//
-//        // Count total records
-//        String countSql = "SELECT COUNT(*) FROM tb_FarReport ";
-//        if (!status.equalsIgnoreCase("")) {
-//            countSql += " WHERE assetId = '" + status + "'";
-//        }
-//        int totalRecords = jdbcTemplate.queryForObject(countSql, Integer.class);
-//
-//        // Set response type to JSON
-//        response.setContentType("application/json");
-//        PrintWriter out = response.getWriter();
-//        out.write("["); // Start JSON array
-//
-//        AtomicInteger counter = new AtomicInteger(0);
-//        boolean firstChunk = true;
-//
-//        // Loop through pages until all records are fetched
-//        while (true) {
-//            // Calculate offset for pagination
-//            int offset = (page - 1) * size;
-//
-//            // Prepare SQL query with pagination
-//            String sql = "SELECT recordNo, recordDatetime, book, assetId, quantity, description, creationDate, serialNumber, tagNumber, picStatus, picDate, cipDeliveryDate, linkId, acceptanceNumber, depreciateFlag, cipEu, invoiceNumber, poNumber, poLineNumber, uplLine, transferToNewFar, assetStatus, value, partNumber, vendorName, vendorNumber, mergedCode, costAccount, accumulatedDepreAccount, cipCostAccount, expenseCostCenter, expenseAccount, Life, datePlacedInService, cost, nbv, depreciationAmount, ytdDepreciation, depreciationReserve, salvageValue, category, categoryDescription, locationSegment1, locationSegment2, locationSegment3, locationSegment4, locations, sequenceNumber, createdBy, createdDate, updatedBy, updatedDate, monthlyDepreciationAmt, accumulatedDepreciationAmt, depreciationDate, netCost FROM tb_FarReport ";
-//
-//            if (!status.equalsIgnoreCase("")) {
-//                sql += " WHERE assetId='" + status + "'";
-//            }
-//
-//            sql += " LIMIT " + size + " OFFSET " + offset;
-//
-//            this.LOGGER.info("Executing SQL: " + sql);
-//
-//            // Query the database
-//            List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql);
-//
-//            // If no more records, break the loop
-//            if (rows.isEmpty()) {
-//                break;
-//            }
-//
-//            // Write each row to the output
-//            for (Map<String, Object> row : rows) {
-//                if (!firstChunk) {
-//                    out.write(","); // Add comma between JSON objects
-//                }
-//                out.write(new JSONObject(row).toString()); // Convert row to JSON and write to output
-//                firstChunk = false;
-//            }
-//
-//            // Move to the next page
-//            page++;
-//        }
-//
-//        out.write("]"); // End JSON array
-//        out.flush();
-//    }
     @PostMapping(value = "getFAR", produces = "application/json")
     @CrossOrigin(origins = "*", allowedHeaders = "*", maxAge = 3600)
     public Map<String, Object> getFARKSA(@RequestBody JSONObject assetRequest) {
@@ -252,94 +176,7 @@ public class AlmAssetManagementController {
         return response;
     }
 
-//    @RequestMapping({"getFAR1"})
-//    public JSONArray getFARKSA1(@RequestBody JSONObject assetRequest, HttpServletResponse httpResponse,
-//            @RequestParam(defaultValue = "0") int page,
-//            @RequestParam(defaultValue = "50") int size
-//    ) {
-//        JSONArray jsonObjectResponse = new JSONArray();
-//        try {
-//            this.LOGGER.info("GET ALL ASSETS " + assetRequest);
-//            String assetId = assetRequest.getAsString("assetId");
-//
-//            List<tb_FarReport> allReport = this.farReportService.findAll();
-//            if (!assetId.equalsIgnoreCase("") || !assetId.isEmpty()) {
-//                allReport = this.farReportService.findByAssetId(assetId);
-//            } else {
-//
-//            }
-//            for (int i = 0; i < allReport.size(); i++) {
-//                JSONObject singleAssetObj = new JSONObject();
-//                tb_FarReport financeRPT = allReport.get(i);
-//                singleAssetObj.put("recordNo", financeRPT.getRecordNo());
-//                singleAssetObj.put("recordDatetime", financeRPT.getRecordDatetime());
-//                singleAssetObj.put("book", financeRPT.getBook());
-//                singleAssetObj.put("assetId", financeRPT.getAssetId());
-//                singleAssetObj.put("quantity", financeRPT.getQuantity());
-//                singleAssetObj.put("description", financeRPT.getDescription());
-//                singleAssetObj.put("creationDate", financeRPT.getCreationDate());
-//                singleAssetObj.put("serialNumber", financeRPT.getSerialNumber());
-//                singleAssetObj.put("tagNumber", financeRPT.getTagNumber());
-//                singleAssetObj.put("picStatus", financeRPT.getPicStatus());
-//                singleAssetObj.put("picDate", financeRPT.getPicDate());
-//                singleAssetObj.put("cipDeliveryDate", financeRPT.getCipDeliveryDate());
-//                singleAssetObj.put("linkId", financeRPT.getLinkId());
-//                singleAssetObj.put("acceptanceNumber", financeRPT.getAcceptanceNumber());
-//                singleAssetObj.put("depreciateFlag", financeRPT.getDepreciateFlag());
-//                singleAssetObj.put("cipEu", financeRPT.getCipEu());
-//                singleAssetObj.put("invoiceNumber", financeRPT.getInvoiceNumber());
-//                singleAssetObj.put("poNumber", financeRPT.getPoNumber());
-//                singleAssetObj.put("poLineNumber", financeRPT.getPoLineNumber());
-//                singleAssetObj.put("uplLine", financeRPT.getUplLine());
-//                singleAssetObj.put("transferToNewFar", financeRPT.getTransferToNewFar());
-//                singleAssetObj.put("assetStatus", financeRPT.getAssetStatus());
-//                singleAssetObj.put("value", financeRPT.getValue());
-//                singleAssetObj.put("partNumber", financeRPT.getPartNumber());
-//                singleAssetObj.put("vendorName", financeRPT.getVendorName());
-//                singleAssetObj.put("vendorNumber", financeRPT.getVendorNumber());
-//                singleAssetObj.put("mergedCode", financeRPT.getMergedCode());
-//                singleAssetObj.put("costAccount", financeRPT.getCostAccount());
-//                singleAssetObj.put("accumulatedDepreAccount", financeRPT.getAccumulatedDepreAccount());
-//                singleAssetObj.put("cipCostAccount", financeRPT.getCipCostAccount());
-//                singleAssetObj.put("expenseCostCenter", financeRPT.getExpenseCostCenter());
-//                singleAssetObj.put("expenseAccount", financeRPT.getExpenseAccount());
-//                singleAssetObj.put("life", financeRPT.getLife());
-//                singleAssetObj.put("datePlacedInService", financeRPT.getDatePlacedInService());
-//                singleAssetObj.put("cost", financeRPT.getCost());
-//                singleAssetObj.put("nbv", financeRPT.getNbv());
-//                singleAssetObj.put("depreciationAmount", financeRPT.getDepreciationAmount());
-//                singleAssetObj.put("ytdDepreciation", financeRPT.getYtdDepreciation());
-//                singleAssetObj.put("depreciationReserve", financeRPT.getDepreciationReserve());
-//                singleAssetObj.put("salvageValue", financeRPT.getSalvageValue());
-//                singleAssetObj.put("category", financeRPT.getCategory());
-//                singleAssetObj.put("categoryDescription", financeRPT.getCategoryDescription());
-//                singleAssetObj.put("locationSegment1", financeRPT.getLocationSegment1());
-//                singleAssetObj.put("locationSegment1", financeRPT.getLocationSegment1());
-//                singleAssetObj.put("locationSegment2", financeRPT.getLocationSegment2());
-//                singleAssetObj.put("locationSegment3", financeRPT.getLocationSegment3());
-//                singleAssetObj.put("locationSegment4", financeRPT.getLocationSegment4());
-//                singleAssetObj.put("locations", financeRPT.getLocations());
-//                singleAssetObj.put("sequenceNumber", financeRPT.getSequenceNumber());
-//                // Add null check for monthlyDepreciationAmt
-//                singleAssetObj.put("monthlyDepreciationAmt", financeRPT.getMonthlyDepreciationAmt() != null ? financeRPT.getMonthlyDepreciationAmt() : 0.0);
-//                singleAssetObj.put("accumulatedDepreciationAmt", financeRPT.getAccumulatedDepreciationAmt() != null ? financeRPT.getAccumulatedDepreciationAmt() : 0.0);
-//                singleAssetObj.put("netCost", financeRPT.getNetCost() != null ? financeRPT.getNetCost() : 0.0);
-//
-//                //   //singleAssetObj.put("monthlyDepreciationAmt", financeRPT.getMonthlyDepreciationAmt());
-//                //singleAssetObj.put("accumulatedDepreciationAmt", financeRPT.getAccumulatedDepreciationAmt());
-//                // singleAssetObj.put("approvalStatus", financeRPT.getApprovalStatus());
-//                singleAssetObj.put("depreciationDate", financeRPT.getDepreciationDate());
-//                singleAssetObj.put("netCost", financeRPT.getNetCost());
-//                jsonObjectResponse.add(singleAssetObj);
-//            }
-//            //this.LOGGER.info("GET ALL ASSETS RESPONSE  " + jsonObjectResponse.toJSONString());
-//        } catch (NumberFormatException ex) {
-//            this.LOGGER.info("EXCEPTION::" + ex.getMessage());
-//            return jsonObjectResponse;
-//        }
-//        return jsonObjectResponse;
-//    }
-    //UPLOAD NEW FAR  REPORT PER KSA FORMART
+
     @RequestMapping({"uploadFAR"})
     public JSONObject uploadFAR(@RequestBody String req, HttpServletResponse httpResponse) throws ParseException {
         JSONObject jsonObjectResponse = new JSONObject();
@@ -441,7 +278,7 @@ public class AlmAssetManagementController {
 
                     }
                 } else {
-                    //UPDATE THE FR HERE BUT CHECK THE DETAILS AS WELL  
+                    //UPDATE THE FR HERE BUT CHECK THE DETAILS AS WELL
                     if (!assetID.equalsIgnoreCase("")) {
                         //check if record number id 0, if its zero check if the asset id is uniques
                         List<tb_FarReport> financeList = this.farReportService.findByAssetId(assetID);
@@ -548,7 +385,7 @@ public class AlmAssetManagementController {
         return jsonObjectResponse;
     }
 
-    //UPLOAD FINANCIAL REPORT HERE 
+    //UPLOAD FINANCIAL REPORT HERE
     @RequestMapping({"uploadFR"})
     public JSONObject uploadFR(@RequestBody String req, HttpServletResponse httpResponse
     ) {
@@ -557,62 +394,75 @@ public class AlmAssetManagementController {
         String assetID = "";
         SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd");
         try {
-
             org.json.JSONArray jsonArray = new org.json.JSONArray(req);
+
             for (int i = 0; i < jsonArray.length(); i++) {
                 org.json.JSONObject jsonObject = jsonArray.getJSONObject(i);
                 this.LOGGER.info("RECEIVED FINANCIAL REPORT REQUEST" + req);
+
                 recordNo = Integer.parseInt(jsonObject.getString("recordNo"));
-                assetID = jsonObject.getString("assetId");
+                assetID = jsonObject.getString("siteId"); // Fixed assetId to siteId
+
                 if (recordNo == 0) {
-                    if (!assetID.equalsIgnoreCase("")) {
-                        //check if record number id 0, if its zero check if the asset id is uniques
-                        List<tb_FinancialReport> financeList = this.financialReportService.findByAssetId(assetID);
-                        if (!financeList.isEmpty()) {
-                            jsonObjectResponse.put("error", "Error occured, AssetCode already exist" + assetID);
-                        } else if (jsonObject.getString("dateOfService").isEmpty()) {
-                            jsonObjectResponse.put("error", "Error occured, Date of service cannot be empty " + assetID);
-                        } else if (jsonObject.getDouble("initialCost") < 1) {
-                            jsonObjectResponse.put("error", "Error occured, Input a valid initial cost for the asset id " + assetID);
+                    if (!assetID.trim().isEmpty()) {
+                        // Check if siteId already exists
+                        Optional<tb_FinancialReport> financeOpt = this.financialReportService.findByAssetName(assetID); //
+
+                        if (!financeOpt.isPresent()) {
+                            jsonObjectResponse.put("error", "Error occurred, Site ID already exists: " + assetID);
+                        } else if (!jsonObject.has("dateOfService") || jsonObject.getString("dateOfService").trim().isEmpty()) {
+                            jsonObjectResponse.put("error", "Error occurred, Date of service cannot be empty for Site ID: " + assetID);
+                        } else if (!jsonObject.has("initialCost") || jsonObject.getDouble("initialCost") < 1) {
+                            jsonObjectResponse.put("error", "Error occurred, Input a valid initial cost for Site ID: " + assetID);
                         } else {
                             tb_FinancialReport newFinance = new tb_FinancialReport();
-                            newFinance.setSerialNumber(jsonObject.getString("serialNumber"));
-                            newFinance.setRfid(jsonObject.getString("rfid"));
+
+                            newFinance.setAssetSerialNumber(jsonObject.getString("serialNumber"));
                             newFinance.setTag(jsonObject.getString("tag"));
-                            newFinance.setAssetId(jsonObject.getString("assetId"));
+                            newFinance.setSiteId(jsonObject.getString("siteId")); // Fixed assetId to siteId
                             newFinance.setAssetType(jsonObject.getString("assetType"));
                             newFinance.setNodeType(jsonObject.getString("nodeType"));
-                            String installationDate = jsonObject.getString("installationDate");
-                            newFinance.setInstallationDate(format.parse(installationDate));
-                            newFinance.setInitialCost(jsonObject.getDouble("initialCost"));
-                            newFinance.setSalvageValue(jsonObject.getDouble("salvageValue"));
-                            newFinance.setPoNumber(jsonObject.getString("poNumber"));
-                            String poDate = jsonObject.getString("poDate");
-                            newFinance.setPoDate(format.parse(poDate));
-                            newFinance.setNewFACategory(jsonObject.getString("newFACategory"));
+
+                            // Parse Dates
+                            newFinance.setInstallationDate(String.valueOf(format.parse(jsonObject.getString("installationDate"))));
+                            newFinance.setPoDate(String.valueOf(format.parse(jsonObject.getString("poDate"))));
+                            newFinance.setDateOfService(String.valueOf(format.parse(jsonObject.getString("dateOfService"))));
+
+                            // Handle BigDecimal values safely
+                            newFinance.setInitialCost(BigDecimal.valueOf(jsonObject.getDouble("initialCost")));
+                            newFinance.setSalvageValue(BigDecimal.valueOf(jsonObject.getDouble("salvageValue")));
+                            newFinance.setAdjustment(BigDecimal.valueOf(jsonObject.getDouble("adjustment")));
+
+                            // Set Category & Depreciation Details
+                            newFinance.setFaCategory(jsonObject.getString("newFACategory"));
                             newFinance.setL1(jsonObject.getString("L1"));
                             newFinance.setL2(jsonObject.getString("L2"));
                             newFinance.setL3(jsonObject.getString("L3"));
                             newFinance.setL4(jsonObject.getString("L4"));
-                            newFinance.setAccDepreciationCode(jsonObject.getString("accDepreciationCode"));
+                            newFinance.setAccumulatedDepreciationCode(jsonObject.getString("accDepreciationCode"));
                             newFinance.setDepreciationCode(jsonObject.getString("depreciationCode"));
-                            newFinance.setUserfulLife(jsonObject.getInt("userfulLife"));
+                            newFinance.setUsefulLifeMonths(jsonObject.getInt("userfulLife")); // Fixed method name
+
+                            // Vendor & Project Information
                             newFinance.setVendorName(jsonObject.getString("vendorName"));
                             newFinance.setVendorNumber(jsonObject.getString("vendorNumber"));
                             newFinance.setProjectNumber(jsonObject.getString("projectNumber"));
-                            String dateOfService = jsonObject.getString("dateOfService");
-                            newFinance.setDateOfService(format.parse(dateOfService));
-                            newFinance.setOldFACategory(jsonObject.getString("oldFACategory"));
-                            newFinance.setCostCenter(jsonObject.getString("costCenter"));
-                            newFinance.setAdjustment(jsonObject.getDouble("adjustment"));
+
+                            // Cost Center & Financial Details
+                            newFinance.setOldFarCategory(jsonObject.getString("oldFACategory")); // Fixed method name
+                            newFinance.setCostCenterData(jsonObject.getString("costCenter")); // Fixed method name
                             newFinance.setInvoiceNumber(jsonObject.getString("invoiceNumber"));
+
+                            // Additional Fields
                             newFinance.setTaskId(jsonObject.getString("taskId"));
                             newFinance.setPoLineNumber(jsonObject.getString("poLineNumber"));
-                            newFinance.setApprovalStatus("created");
-                            this.financialReportService.save(newFinance);
-                            //   jsonObjectResponse.put("responseCode", "00");
-                            // jsonObjectResponse.put("responseMessage", "Asset transfered Successfully");
+                            newFinance.setFinancialApprovalStatus("Created"); // Fixed method name
 
+                            // Save the new financial report
+                            this.financialReportService.save(newFinance);
+
+                            jsonObjectResponse.put("responseCode", "00");
+                            jsonObjectResponse.put("responseMessage", "Asset successfully created.");
                         }
 
                     } else {
@@ -620,58 +470,71 @@ public class AlmAssetManagementController {
 
                     }
                 } else {
-                    //UPDATE THE FR HERE BUT CHECK THE DETAILS AS WELL  
-                    if (!assetID.equalsIgnoreCase("")) {
-                        //check if record number id 0, if its zero check if the asset id is uniques
-                        List<tb_FinancialReport> financeList = this.financialReportService.findByAssetId(assetID);
-                        if (financeList.isEmpty()) {
-                            jsonObjectResponse.put("error", "Error occurred, Asset ID not found: " + assetID);
-                        } else if (jsonObject.getString("dateOfService").isEmpty()) {
-                            jsonObjectResponse.put("error", "Error occured, Date of service cannot be empty " + assetID);
-                        } else if (jsonObject.getDouble("initialCost") < 1) {
-                            jsonObjectResponse.put("error", "Error occured, Input a valid initial cost for the asset id " + assetID);
+                    if (!assetID.trim().isEmpty()) {
+                        // Check if the record exists in the database
+                        Optional<tb_FinancialReport> financeOpt = this.financialReportService.findByAssetName(assetID);
+
+                        // UPDATE THE FINANCIAL REPORT HERE BUT CHECK THE DETAILS FIRST
+
+
+                        if (financeOpt.isPresent()) {
+                            jsonObjectResponse.put("error", "Error occurred, Site ID not found: " + assetID);
+                        } else if (!jsonObject.has("dateOfService") || jsonObject.getString("dateOfService").trim().isEmpty()) {
+                            jsonObjectResponse.put("error", "Error occurred, Date of service cannot be empty for Site ID: " + assetID);
+                        } else if (!jsonObject.has("initialCost") || jsonObject.getDouble("initialCost") < 1) {
+                            jsonObjectResponse.put("error", "Error occurred, Input a  valid initial cost for the Site ID: " + assetID);
                         } else {
-                            tb_FinancialReport finance = financeList.get(0);
-                            finance.setSerialNumber(jsonObject.getString("serialNumber"));
-                            finance.setRfid(jsonObject.getString("rfid"));
+                            tb_FinancialReport finance = financeOpt.get();
+
+                            finance.setAssetSerialNumber(jsonObject.getString("serialNumber"));
                             finance.setTag(jsonObject.getString("tag"));
-                            finance.setAssetId(jsonObject.getString("assetId"));
+                            finance.setSiteId(jsonObject.getString("siteId")); // Replacing assetId with siteId
                             finance.setAssetType(jsonObject.getString("assetType"));
                             finance.setNodeType(jsonObject.getString("nodeType"));
-                            String installationDate = jsonObject.getString("installationDate");
-                            finance.setInstallationDate(format.parse(installationDate));
-                            finance.setInitialCost(jsonObject.getDouble("initialCost"));
-                            finance.setSalvageValue(jsonObject.getDouble("salvageValue"));
-                            finance.setPoNumber(jsonObject.getString("poNumber"));
-                            String poDate = jsonObject.getString("poDate");
-                            finance.setPoDate(format.parse(poDate));
-                            finance.setNewFACategory(jsonObject.getString("newFACategory"));
+
+                            // Parse Dates
+                            finance.setInstallationDate(String.valueOf(format.parse(jsonObject.getString("installationDate"))));
+                            finance.setPoDate(String.valueOf(format.parse(jsonObject.getString("poDate"))));
+                            finance.setDateOfService(String.valueOf(format.parse(jsonObject.getString("dateOfService"))));
+
+                            // Handle BigDecimal values safely
+                            finance.setInitialCost(BigDecimal.valueOf(jsonObject.getDouble("initialCost")));
+                            finance.setSalvageValue(BigDecimal.valueOf(jsonObject.getDouble("salvageValue")));
+                            finance.setAdjustment(BigDecimal.valueOf(jsonObject.getDouble("adjustment")));
+
+                            // Set Category & Depreciation Details
+                            finance.setFaCategory(jsonObject.getString("newFACategory"));
                             finance.setL1(jsonObject.getString("L1"));
                             finance.setL2(jsonObject.getString("L2"));
                             finance.setL3(jsonObject.getString("L3"));
                             finance.setL4(jsonObject.getString("L4"));
-                            finance.setAccDepreciationCode(jsonObject.getString("accDepreciationCode"));
+                            finance.setAccumulatedDepreciationCode(jsonObject.getString("accDepreciationCode"));
                             finance.setDepreciationCode(jsonObject.getString("depreciationCode"));
-                            finance.setUserfulLife(jsonObject.getInt("userfulLife"));
+                            finance.setUsefulLifeMonths(jsonObject.getInt("userfulLife")); // Fixed method name
+
+                            // Vendor & Project Information
                             finance.setVendorName(jsonObject.getString("vendorName"));
                             finance.setVendorNumber(jsonObject.getString("vendorNumber"));
                             finance.setProjectNumber(jsonObject.getString("projectNumber"));
-                            String dateOfService = jsonObject.getString("dateOfService");
-                            finance.setDateOfService(format.parse(dateOfService));
-                            finance.setOldFACategory(jsonObject.getString("oldFACategory"));
-                            finance.setCostCenter(jsonObject.getString("costCenter"));
-                            finance.setAdjustment(jsonObject.getDouble("adjustment"));
+
+                            // Cost Center & Financial Details
+                            finance.setOldFarCategory(jsonObject.getString("oldFACategory")); // Fixed method name
+                            finance.setCostCenterData(jsonObject.getString("costCenter")); // Fixed method name
                             finance.setInvoiceNumber(jsonObject.getString("invoiceNumber"));
+
+                            // Additional Fields
                             finance.setTaskId(jsonObject.getString("taskId"));
                             finance.setPoLineNumber(jsonObject.getString("poLineNumber"));
-                            finance.setApprovalStatus("updated");
-                            this.financialReportService.save(finance);
-                            //   jsonObjectResponse.put("responseCode", "00");
-                            // jsonObjectResponse.put("responseMessage", "Asset transfered Successfully");
+                            finance.setFinancialApprovalStatus("Updated"); // Fixed method name
 
+                            // Save the updated financial report
+                            this.financialReportService.save(finance);
+
+                            jsonObjectResponse.put("responseCode", "00");
+                            jsonObjectResponse.put("responseMessage", "Asset successfully updated.");
                         }
 
-                    } else {
+            } else {
                         jsonObjectResponse.put("errorcode", "Missing Asset Code detected");
 
                     }
@@ -699,28 +562,30 @@ public class AlmAssetManagementController {
     }
 
     @RequestMapping({"getFinancialReport"})
-    public JSONArray getFinancialReport(@RequestBody JSONObject assetRequest, HttpServletResponse httpResponse
-    ) {
+    public JSONArray getFinancialReport(@RequestBody JSONObject assetRequest, HttpServletResponse httpResponse) {
         JSONArray jsonObjectResponse = new JSONArray();
         try {
             this.LOGGER.info("GET ALL ASSETS " + assetRequest);
             String status = assetRequest.getAsString("assetId");
+
             List<tb_FinancialReport> allReport = this.financialReportService.findAll();
-            if (!status.equalsIgnoreCase("") || !status.isEmpty()) {
-                allReport = this.financialReportService.findByAssetId(status);
-            } else {
 
+            // Filter based on Site ID (No Asset ID in tb_FinancialReport)
+            if (status != null && !status.trim().isEmpty()) {
+                Optional<tb_FinancialReport> financeOpt = this.financialReportService.findByAssetName(status); // FIXED
+
+                allReport = financeOpt.map(Collections::singletonList).orElse(Collections.emptyList()); // Converts Optional to List
             }
-            for (int i = 0; i < allReport.size(); i++) {
-                JSONObject singleAssetObj = new JSONObject();
-                tb_FinancialReport financeRPT = allReport.get(i);
 
-                singleAssetObj.put("recordNo", financeRPT.getRecordNo());
-                singleAssetObj.put("recordDatetime", financeRPT.getRecordDatetime());
-                singleAssetObj.put("serialNumber", financeRPT.getSerialNumber());
-                singleAssetObj.put("rfid", financeRPT.getRfid());
+
+
+            for (tb_FinancialReport financeRPT : allReport) {
+                JSONObject singleAssetObj = new JSONObject();
+
+                singleAssetObj.put("id", financeRPT.getId()); // Corrected
+                singleAssetObj.put("serialNumber", financeRPT.getAssetSerialNumber());
                 singleAssetObj.put("tag", financeRPT.getTag());
-                singleAssetObj.put("assetId", financeRPT.getAssetId());
+                singleAssetObj.put("siteId", financeRPT.getSiteId()); // Replacing assetId with siteId
                 singleAssetObj.put("assetType", financeRPT.getAssetType());
                 singleAssetObj.put("nodeType", financeRPT.getNodeType());
                 singleAssetObj.put("installationDate", financeRPT.getInstallationDate());
@@ -728,42 +593,45 @@ public class AlmAssetManagementController {
                 singleAssetObj.put("salvageValue", financeRPT.getSalvageValue());
                 singleAssetObj.put("poNumber", financeRPT.getPoNumber());
                 singleAssetObj.put("poDate", financeRPT.getPoDate());
-                singleAssetObj.put("newFACategory", financeRPT.getNewFACategory());
+                singleAssetObj.put("faCategory", financeRPT.getFaCategory()); // Replacing newFACategory
                 singleAssetObj.put("L1", financeRPT.getL1());
                 singleAssetObj.put("L2", financeRPT.getL2());
                 singleAssetObj.put("L3", financeRPT.getL3());
                 singleAssetObj.put("L4", financeRPT.getL4());
-                singleAssetObj.put("accDepreciationCode", financeRPT.getAccDepreciationCode());
+                singleAssetObj.put("accDepreciationCode", financeRPT.getAccumulatedDepreciationCode()); // Corrected
                 singleAssetObj.put("depreciationCode", financeRPT.getDepreciationCode());
-                singleAssetObj.put("userfulLife", financeRPT.getUserfulLife());
+                singleAssetObj.put("usefulLife", financeRPT.getUsefulLifeMonths()); // Corrected userfulLife
                 singleAssetObj.put("vendorName", financeRPT.getVendorName());
                 singleAssetObj.put("vendorNumber", financeRPT.getVendorNumber());
                 singleAssetObj.put("projectNumber", financeRPT.getProjectNumber());
                 singleAssetObj.put("dateOfService", financeRPT.getDateOfService());
-                singleAssetObj.put("oldFACategory", financeRPT.getOldFACategory());
-                singleAssetObj.put("costCenter", financeRPT.getCostCenter());
+                singleAssetObj.put("oldFaCategory", financeRPT.getOldFarCategory()); // Corrected oldFACategory
+                singleAssetObj.put("costCenterData", financeRPT.getCostCenterData()); // Corrected costCenter
                 singleAssetObj.put("adjustment", financeRPT.getAdjustment());
                 singleAssetObj.put("invoiceNumber", financeRPT.getInvoiceNumber());
                 singleAssetObj.put("taskId", financeRPT.getTaskId());
                 singleAssetObj.put("poLineNumber", financeRPT.getPoLineNumber());
-                // Add null check for monthlyDepreciationAmt
-                singleAssetObj.put("monthlyDepreciationAmt", financeRPT.getMonthlyDepreciationAmt() != null ? financeRPT.getMonthlyDepreciationAmt() : 0.0);
-                singleAssetObj.put("accumulatedDepreciationAmt", financeRPT.getAccumulatedDepreciationAmt() != null ? financeRPT.getAccumulatedDepreciationAmt() : 0.0);
-                singleAssetObj.put("netCost", financeRPT.getNetCost() != null ? financeRPT.getNetCost() : 0.0);
 
-                //   //singleAssetObj.put("monthlyDepreciationAmt", financeRPT.getMonthlyDepreciationAmt());
-                //singleAssetObj.put("accumulatedDepreciationAmt", financeRPT.getAccumulatedDepreciationAmt());
-                singleAssetObj.put("approvalStatus", financeRPT.getApprovalStatus());
-                singleAssetObj.put("depreciationDate", financeRPT.getDepreciationDate());
-                //singleAssetObj.put("netCost", financeRPT.getNetCost());
+                // Null check for numeric values
+                singleAssetObj.put("monthlyDepreciationAmt", financeRPT.getMonthlyDepreciationAmount() != null
+                        ? financeRPT.getMonthlyDepreciationAmount() : BigDecimal.ZERO);
+                singleAssetObj.put("accumulatedDepreciationAmt", financeRPT.getAccumulatedDepreciation() != null
+                        ? financeRPT.getAccumulatedDepreciation() : BigDecimal.ZERO);
+                singleAssetObj.put("netCost", financeRPT.getNetCost() != null
+                        ? financeRPT.getNetCost() : BigDecimal.ZERO);
+
+                singleAssetObj.put("approvalStatus", financeRPT.getFinancialApprovalStatus()); // Corrected
+                singleAssetObj.put("retirementDate", financeRPT.getRetirementDate()); // Corrected from depreciationDate
+
                 jsonObjectResponse.add(singleAssetObj);
             }
         } catch (NumberFormatException ex) {
             this.LOGGER.info("EXCEPTION::" + ex.getMessage());
-            return jsonObjectResponse;
         }
         return jsonObjectResponse;
     }
+
+
 
     @RequestMapping({"assetTransfer"})
     public JSONObject assetTransfer(@RequestBody JSONObject assetRequest, HttpServletResponse httpResponse

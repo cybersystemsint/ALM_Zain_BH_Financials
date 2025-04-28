@@ -16,7 +16,7 @@ import javax.persistence.Table;
 
 /**
  *
- * @author jgithu
+ * @author Gilian
  */
 @Entity
 @Table(name = "`tb_FarReport`", indexes = {
