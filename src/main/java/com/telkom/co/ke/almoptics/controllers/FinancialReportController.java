@@ -50,7 +50,8 @@ import java.util.ArrayList;
 
 @RestController
 @RequestMapping("/api/financial")
-@CrossOrigin(origins = "*")
+//@CrossOrigin(origins = "*")
+@CrossOrigin(origins = {"http://localhost:3000", "*"}, allowedHeaders = "*", methods = {RequestMethod.GET, RequestMethod.POST, RequestMethod.PUT, RequestMethod.DELETE, RequestMethod.OPTIONS})
 public class FinancialReportController {
 
     private static final Logger logger = LoggerFactory.getLogger(FinancialReportController.class);
@@ -198,6 +199,7 @@ public class FinancialReportController {
         }
     }
 
+
     @Transactional
     @PostMapping("/upload")
     public ResponseEntity<Map<String, Object>> uploadFinancialReports(
@@ -216,9 +218,9 @@ public class FinancialReportController {
             List<Integer> workflowIds = new ArrayList<>();
             List<String> warnings = new ArrayList<>();
             int recordsProcessed = 0;
-            int recordsAccepted = 0;
+            int recordsCreated = 0;
+            int recordsUpdated = 0;
             int recordsSkipped = 0;
-            final int BATCH_SIZE = 50;
 
             // Validate all records upfront
             for (int i = 0; i < reports.size(); i++) {
@@ -280,42 +282,71 @@ public class FinancialReportController {
                 recordsProcessed++;
                 String identifier = report.getAssetSerialNumber() != null && !report.getAssetSerialNumber().isEmpty() ?
                         report.getAssetSerialNumber() : report.getAssetName();
-
-                // Check if record exists in unmapped inventory
-                boolean inUnmapped = unmappedActiveInventoryRepository.findBySerialNumber(identifier).isPresent() ||
-                        unmappedPassiveInventoryRepository.findBySerial(identifier).isPresent() ||
-                        unmappedPassiveInventoryRepository.findByObjectId(identifier).isPresent() ||
-                        unmappedPassiveInventoryRepository.findByElementType(identifier).isPresent() ||
-                        unmappedITInventoryRepository.findByHostSerialNumber(identifier).isPresent() ||
-                        unmappedITInventoryRepository.findByHardwareSerialNumber(identifier).isPresent() ||
-                        unmappedITInventoryRepository.findByElementId(identifier).isPresent() ||
-                        unmappedITInventoryRepository.findByHostName(identifier).isPresent();
-
-                // Check if record exists in Financial Report
-                Optional<tb_FinancialReport> existingReportOpt = financialReportService.findBySerialNumber(identifier)
-                        .or(() -> financialReportService.findByAssetName(identifier));
+                logger.info("Processing record {} with identifier: {}", recordsProcessed, identifier);
 
                 // Check for pending workflows
-                List<tb_ApprovalWorkflow> existingWorkflows = approvalWorkflowService.findByAssetId(identifier);
-                boolean hasPendingWorkflow = existingWorkflows.stream()
-                        .anyMatch(w -> w.getUPDATED_STATUS().startsWith("Pending"));
+                List<tb_ApprovalWorkflow> existingWorkflows = null;
+                try {
+                    existingWorkflows = approvalWorkflowService.findByAssetId(identifier);
+                } catch (Exception e) {
+                    logger.error("Error querying workflows for identifier: {}", identifier, e);
+                    warnings.add("Record " + recordsProcessed + ": Unable to check workflow status for identifier " + identifier + " due to server error");
+                    recordsSkipped++;
+                    continue;
+                }
 
-                tb_FinancialReport savedReport = null;
-                tb_ApprovalWorkflow workflow = null;
+                boolean hasPendingWorkflow = existingWorkflows != null && existingWorkflows.stream()
+                        .anyMatch(w -> w.getUPDATED_STATUS() != null && w.getUPDATED_STATUS().toLowerCase().startsWith("pending"));
 
-                if (!inUnmapped) {
+                if (hasPendingWorkflow) {
+                    logger.info("Skipping record {} for identifier {} due to pending workflow", recordsProcessed, identifier);
+                    warnings.add("Record " + recordsProcessed + ": Identifier " + identifier +
+                            " has an existing workflow pending approval process and will be skipped.");
+                    recordsSkipped++;
+                    continue;
+                }
+
+                // Check if record exists in Financial Report
+                Optional<tb_FinancialReport> existingReportOpt;
+                try {
+                    existingReportOpt = financialReportService.findBySerialNumber(identifier)
+                            .or(() -> financialReportService.findByAssetName(identifier));
+                } catch (Exception e) {
+                    logger.error("Error querying financial report for identifier: {}", identifier, e);
+                    warnings.add("Record " + recordsProcessed + ": Unable to check financial report for identifier " + identifier + " due to server error");
+                    recordsSkipped++;
+                    continue;
+                }
+
+                // Check unmapped inventory only for new records
+                boolean inUnmapped = true;
+                if (!existingReportOpt.isPresent()) {
+                    try {
+                        inUnmapped = unmappedActiveInventoryRepository.findBySerialNumber(identifier).isPresent() ||
+                                unmappedPassiveInventoryRepository.findBySerial(identifier).isPresent() ||
+                                unmappedPassiveInventoryRepository.findByObjectId(identifier).isPresent() ||
+                                unmappedPassiveInventoryRepository.findByElementType(identifier).isPresent() ||
+                                unmappedITInventoryRepository.findByHostSerialNumber(identifier).isPresent() ||
+                                unmappedITInventoryRepository.findByHardwareSerialNumber(identifier).isPresent() ||
+                                unmappedITInventoryRepository.findByElementId(identifier).isPresent() ||
+                                unmappedITInventoryRepository.findByHostName(identifier).isPresent();
+                    } catch (Exception e) {
+                        logger.error("Error querying unmapped inventory for identifier: {}", identifier, e);
+                        warnings.add("Record " + recordsProcessed + ": Unable to check unmapped inventory for identifier " + identifier + " due to server error");
+                        recordsSkipped++;
+                        continue;
+                    }
+                }
+
+                if (!existingReportOpt.isPresent() && !inUnmapped) {
                     warnings.add("Record " + recordsProcessed + ": Identifier " + identifier +
                             " not found in unmapped inventory. Record cannot be accepted.");
                     recordsSkipped++;
                     continue;
                 }
 
-                if (existingReportOpt.isPresent() && hasPendingWorkflow) {
-                    warnings.add("Record " + recordsProcessed + ": Identifier " + identifier +
-                            " exists in Financial Report and has pending workflow approvals.");
-                    recordsSkipped++;
-                    continue;
-                }
+                tb_FinancialReport savedReport = null;
+                tb_ApprovalWorkflow workflow = null;
 
                 if (existingReportOpt.isPresent()) {
                     tb_FinancialReport existingReport = existingReportOpt.get();
@@ -337,11 +368,17 @@ public class FinancialReportController {
                         existingReport.setInitialCost(BigDecimal.ZERO);
                         existingReport.setChangedBy(username);
                         existingReport.setChangeDate(new Date());
-                        savedReport = financialReportService.save(existingReport);
-                        workflow = approvalWorkflowService.createDeletionWorkflow(savedReport, savedReport.getNodeType(),"pending deletion");
+                        try {
+                            savedReport = financialReportService.save(existingReport);
+                            workflow = approvalWorkflowService.createDeletionWorkflow(savedReport, savedReport.getNodeType(), "pending deletion");
+                        } catch (Exception e) {
+                            logger.error("Error processing deletion for identifier: {}", identifier, e);
+                            warnings.add("Record " + recordsProcessed + ": Failed to process deletion for identifier " + identifier);
+                            recordsSkipped++;
+                            continue;
+                        }
                     } else {
-                        // Handle modification (logic from /reports/modify/{identifier})
-                        // Save original state
+                        // Handle modification
                         try {
                             Map<String, Object> originalState = new HashMap<>();
                             originalState.put("siteId", existingReport.getSiteId());
@@ -449,67 +486,75 @@ public class FinancialReportController {
                         existingReport.setRfid(report.getRfid() != null ? report.getRfid() : existingReport.getRfid());
                         existingReport.setInvoiceNumber(report.getInvoiceNumber() != null ? report.getInvoiceNumber() : existingReport.getInvoiceNumber());
 
-                        // Set audit fields
-                        existingReport.setFinancialApprovalStatus("Pending");
+                        existingReport.setFinancialApprovalStatus("Pending L1 Approval");
                         existingReport.setChangedBy(username);
                         existingReport.setChangeDate(new Date());
 
-                        // Save the updated report
-                        savedReport = financialReportRepo.save(existingReport);
-
-                        // Create approval workflow
-                        workflow = approvalWorkflowService.createApprovalWorkflow(savedReport, savedReport.getNodeType(), "pending modification");
-//                        workflow = approvalWorkflowService.createApprovalWorkflow(savedReport, "FinancialReport");
+                        try {
+                            savedReport = financialReportRepo.save(existingReport);
+                            workflow = approvalWorkflowService.createApprovalWorkflow(savedReport, savedReport.getNodeType(), "pending modification");
+                        } catch (Exception e) {
+                            logger.error("Error processing modification for identifier: {}", identifier, e);
+                            warnings.add("Record " + recordsProcessed + ": Failed to process modification for identifier " + identifier);
+                            recordsSkipped++;
+                            continue;
+                        }
+                        recordsUpdated++;
                     }
                 } else {
-                    // New asset: trigger pending addition
+                    // New asset
                     report.setInsertedBy(username);
                     report.setInsertDate(new Date());
                     report.setStatusFlag("NEW");
                     report.setFinancialApprovalStatus("Pending L1 Approval");
-
-                    savedReport = financialReportService.save(report);
-                    //workflow = approvalWorkflowService.createApprovalWorkflow(savedReport, savedReport.getNodeType());
-                    // Delete from unmapped inventory (unchanged)
-                    workflow = approvalWorkflowService.createApprovalWorkflow(savedReport, savedReport.getNodeType(), "pending addition");
-                    //deleteFromUnmappedInventory(identifier);
+                    try {
+                        savedReport = financialReportService.save(report);
+                        workflow = approvalWorkflowService.createApprovalWorkflow(savedReport, savedReport.getNodeType(), "pending addition");
+                    } catch (Exception e) {
+                        logger.error("Error processing new record for identifier: {}", identifier, e);
+                        warnings.add("Record " + recordsProcessed + ": Failed to process new record for identifier " + identifier);
+                        recordsSkipped++;
+                        continue;
+                    }
+                    recordsCreated++;
                 }
 
                 if (savedReport == null || workflow == null || workflow.getID() == null) {
                     logger.error("Failed to process record {} for identifier: {}", recordsProcessed, identifier);
-                    throw new RuntimeException("Failed to process record for identifier: " + identifier);
+                    warnings.add("Record " + recordsProcessed + ": Failed to create workflow for identifier " + identifier);
+                    recordsSkipped++;
+                    continue;
                 }
 
                 workflowIds.add(workflow.getID());
-                recordsAccepted++;
-
-                if (recordsAccepted % BATCH_SIZE == 0) {
-                    entityManager.flush();
-                    entityManager.clear();
-                    logger.info("Processed batch of {} records, total accepted: {}", BATCH_SIZE, recordsAccepted);
-                }
             }
 
             response.put("recordsProcessed", recordsProcessed);
-            response.put("recordsAccepted", recordsAccepted);
+            response.put("recordsCreated", recordsCreated);
+            response.put("recordsUpdated", recordsUpdated);
             response.put("recordsSkipped", recordsSkipped);
             response.put("workflowIds", workflowIds);
-            response.put("message", recordsAccepted > 0 ? "Successfully uploaded" : "No records processed");
-            response.put("status", recordsAccepted > 0 ? "success" : "success_with_warnings");
+            response.put("message", (recordsCreated + recordsUpdated) > 0 ? "Successfully uploaded financial reports" : "No records processed");
+            response.put("status", (recordsCreated + recordsUpdated) > 0 ? "success" : "success_with_warnings");
 
             if (!warnings.isEmpty()) {
                 response.put("warnings", warnings);
                 response.put("status", "success_with_warnings");
             }
 
+            logger.info("Upload completed: processed={}, created={}, updated={}, skipped={}",
+                    recordsProcessed, recordsCreated, recordsUpdated, recordsSkipped);
             return new ResponseEntity<>(response, HttpStatus.CREATED);
         } catch (Exception e) {
             logger.error("Unexpected error processing uploaded financial reports", e);
-            response.put("message", "Upload failed: " + e.getMessage());
+            response.put("message", "Upload failed due to an unexpected error: " + e.getMessage());
             response.put("status", "error");
+            response.put("errorDetails", e.getClass().getName() + ": " + e.getMessage());
             return new ResponseEntity<>(response, HttpStatus.INTERNAL_SERVER_ERROR);
         }
     }
+
+
 
 
 
