@@ -21,6 +21,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.text.SimpleDateFormat;
 import java.util.Date;
@@ -28,10 +29,10 @@ import java.util.List;
 import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-
 import org.springframework.data.jpa.domain.Specification;
 import javax.persistence.criteria.Predicate;
 import java.util.ArrayList;
+import java.util.function.Supplier;
 
 /**
  * Service for mapping inventory data between source and unmapped tables
@@ -43,6 +44,8 @@ public class UnmappedInventoryService {
 
     private static final Logger logger = LoggerFactory.getLogger(UnmappedInventoryService.class);
     private static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+    private static final int MAX_RETRIES = 3;
+    private static final long BASE_BACKOFF_MS = 2000;
 
     @Autowired
     private ActiveInventoryRepository activeInventoryRepository;
@@ -61,6 +64,33 @@ public class UnmappedInventoryService {
 
     @Autowired
     private UnmappedITInventoryRepository unmappedITRepository;
+
+    /**
+     * Custom retry logic for database operations
+     */
+    private <T> T retryOperation(Supplier<T> operation, String operationName) {
+        int attempt = 0;
+        while (attempt < MAX_RETRIES) {
+            try {
+                return operation.get();
+            } catch (Exception e) {
+                attempt++;
+                if (attempt >= MAX_RETRIES) {
+                    logger.error("Failed {} after {} attempts: {}", operationName, MAX_RETRIES, e.getMessage());
+                    throw e;
+                }
+                long backoff = BASE_BACKOFF_MS * (long) Math.pow(2, attempt);
+                logger.warn("Attempt {}/{} failed for {}, retrying after {}ms: {}", attempt, MAX_RETRIES, operationName, backoff, e.getMessage());
+                try {
+                    Thread.sleep(backoff);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("Interrupted during retry backoff", ie);
+                }
+            }
+        }
+        return null; // Unreachable
+    }
 
     /**
      * Validates and converts a manufacturing date to a Date object if possible,
@@ -121,8 +151,28 @@ public class UnmappedInventoryService {
      * @param username User who triggered the mapping
      * @return The created unmapped active inventory entity
      */
+    @Transactional(timeout = 120)
     public UnmappedActiveInventory mapActiveInventory(ActiveInventory activeInventory, String username) {
-        logger.info("Mapping active inventory to unmapped with serial number: {}", activeInventory.getSerialNumber());
+        String serialNumber = activeInventory.getSerialNumber();
+        logger.info("Mapping active inventory with serial number: {}", serialNumber);
+
+        // Check for duplicates in main inventory
+        boolean hasDuplicates = retryOperation(
+                () -> activeInventoryRepository.findBySerialNumber(serialNumber).size() > 1,
+                "checkActiveDuplicates"
+        );
+        if (hasDuplicates) {
+            return null; // Silently skip duplicates
+        }
+
+        // Check if already in unmapped inventory
+        boolean alreadyUnmapped = retryOperation(
+                () -> unmappedActiveRepository.findBySerialNumber(serialNumber).isPresent(),
+                "checkUnmappedActive"
+        );
+        if (alreadyUnmapped) {
+            return null; // Silently skip already unmapped
+        }
 
         UnmappedActiveInventory unmapped = new UnmappedActiveInventory();
 
@@ -133,12 +183,12 @@ public class UnmappedInventoryService {
         unmapped.setManufacturer(activeInventory.getManufacturer());
         unmapped.setModel(activeInventory.getModel());
         unmapped.setPartNumber(activeInventory.getPartNumber());
-        unmapped.setSerialNumber(activeInventory.getSerialNumber());
+        unmapped.setSerialNumber(serialNumber);
         unmapped.setDescription(activeInventory.getDescription());
         unmapped.setInsertedBy(username);
 
         // Handle manufacturing date (Date or String)
-        Date validDate = validateManufacturingDate(activeInventory.getManufacturingDate(), activeInventory.getSerialNumber());
+        Date validDate = validateManufacturingDate(activeInventory.getManufacturingDate(), serialNumber);
         unmapped.setManufacturingDate(validDate);
 
         // Extract asset type from the node type or description if available
@@ -149,7 +199,10 @@ public class UnmappedInventoryService {
         String assetName = formatAssetName(activeInventory.getNodeName(), element);
         unmapped.setAssetName(assetName);
 
-        return unmappedActiveRepository.save(unmapped);
+        return retryOperation(
+                () -> unmappedActiveRepository.save(unmapped),
+                "saveUnmappedActive"
+        );
     }
 
     /**
@@ -160,17 +213,38 @@ public class UnmappedInventoryService {
      * @param username User who triggered the mapping
      * @return The created unmapped passive inventory entity
      */
+    @Transactional(timeout = 120)
     public UnmappedPassiveInventory mapPassiveInventory(PassiveInventory passiveInventory, String username) {
-        logger.info("Mapping passive inventory to unmapped with serial number: {}", passiveInventory.getSerial());
+        String serialNumber = passiveInventory.getSerial();
+        String objectId = passiveInventory.getObjectId().toString();
+        logger.info("Mapping passive inventory with serial number: {} or object ID: {}", serialNumber, objectId);
+
+        // Check for duplicates in main inventory
+        boolean hasDuplicates = retryOperation(
+                () -> passiveInventoryRepository.findByObjectIdOrSerialNumber(objectId, serialNumber).size() > 1,
+                "checkPassiveDuplicates"
+        );
+        if (hasDuplicates) {
+            return null; // Silently skip duplicates
+        }
+
+        // Check if already in unmapped inventory
+        boolean alreadyUnmapped = retryOperation(
+                () -> unmappedPassiveRepository.findBySerialOrObjectId(serialNumber, objectId).isPresent(),
+                "checkUnmappedPassive"
+        );
+        if (alreadyUnmapped) {
+            return null; // Silently skip already unmapped
+        }
 
         UnmappedPassiveInventory unmapped = new UnmappedPassiveInventory();
 
         // Map standard fields
-        unmapped.setObjectId(passiveInventory.getObjectId().toString());
+        unmapped.setObjectId(objectId);
         unmapped.setSiteId(passiveInventory.getSiteId());
         unmapped.setElementType("PASSIVE");
         unmapped.setModel(passiveInventory.getModel());
-        unmapped.setSerial(passiveInventory.getSerial());
+        unmapped.setSerial(serialNumber);
         unmapped.setEntryDate(new Date());
         unmapped.setEntryUser(username);
 
@@ -183,7 +257,10 @@ public class UnmappedInventoryService {
         unmapped.setNotes(passiveInventory.getNotes());
         unmapped.setPrPoNo(passiveInventory.getPrPoNo());
 
-        return unmappedPassiveRepository.save(unmapped);
+        return retryOperation(
+                () -> unmappedPassiveRepository.save(unmapped),
+                "saveUnmappedPassive"
+        );
     }
 
     /**
@@ -194,8 +271,28 @@ public class UnmappedInventoryService {
      * @param username User who triggered the mapping
      * @return The created unmapped IT inventory entity
      */
+    @Transactional(timeout = 120)
     public UnmappedITInventory mapITInventory(ItInventory itInventory, String username) {
-        logger.info("Mapping IT inventory to unmapped with serial number: {}", itInventory.getHostSerialNumber());
+        String serialNumber = itInventory.getHostSerialNumber();
+        logger.info("Mapping IT inventory with serial number: {}", serialNumber);
+
+        // Check for duplicates in main inventory
+        boolean hasDuplicates = retryOperation(
+                () -> itInventoryRepository.findByObjectIdOrHostSerialNumber(itInventory.getObjectId(), serialNumber).size() > 1,
+                "checkITDuplicates"
+        );
+        if (hasDuplicates) {
+            return null; // Silently skip duplicates
+        }
+
+        // Check if already in unmapped inventory
+        boolean alreadyUnmapped = retryOperation(
+                () -> unmappedITRepository.findByHardwareSerialNumber(serialNumber).isPresent(),
+                "checkUnmappedIT"
+        );
+        if (alreadyUnmapped) {
+            return null; // Silently skip already unmapped
+        }
 
         UnmappedITInventory unmapped = new UnmappedITInventory();
 
@@ -206,7 +303,7 @@ public class UnmappedInventoryService {
         unmapped.setElementType("IT");
         unmapped.setManufacturer(itInventory.getHardwareVendor());
         unmapped.setModel(itInventory.getModel());
-        unmapped.setHardwareSerialNumber(itInventory.getHostSerialNumber());
+        unmapped.setHardwareSerialNumber(serialNumber);
         unmapped.setWarranty("Unknown");
         unmapped.setAssetInsertDate(new Date());
         unmapped.setLastUpdateSuccess(itInventory.getLastUpdateSuccess());
@@ -222,7 +319,10 @@ public class UnmappedInventoryService {
         String assetName = formatAssetName(itInventory.getParentName(), itInventory.getSiteId());
         unmapped.setHostName(assetName);
 
-        return unmappedITRepository.save(unmapped);
+        return retryOperation(
+                () -> unmappedITRepository.save(unmapped),
+                "saveUnmappedIT"
+        );
     }
 
     /**
@@ -330,7 +430,10 @@ public class UnmappedInventoryService {
      * @return Page of unmapped active inventory
      */
     public Page<UnmappedActiveInventory> getUnmappedActiveInventory(Pageable pageable) {
-        return unmappedActiveRepository.findAll(pageable);
+        return retryOperation(
+                () -> unmappedActiveRepository.findAll(pageable),
+                "findAllUnmappedActive"
+        );
     }
 
     /**
@@ -340,7 +443,10 @@ public class UnmappedInventoryService {
      * @return Page of unmapped passive inventory
      */
     public Page<UnmappedPassiveInventory> getUnmappedPassiveInventory(Pageable pageable) {
-        return unmappedPassiveRepository.findAll(pageable);
+        return retryOperation(
+                () -> unmappedPassiveRepository.findAll(pageable),
+                "findAllUnmappedPassive"
+        );
     }
 
     /**
@@ -350,7 +456,10 @@ public class UnmappedInventoryService {
      * @return Page of unmapped IT inventory
      */
     public Page<UnmappedITInventory> getUnmappedITInventory(Pageable pageable) {
-        return unmappedITRepository.findAll(pageable);
+        return retryOperation(
+                () -> unmappedITRepository.findAll(pageable),
+                "findAllUnmappedIT"
+        );
     }
 
     /**
@@ -360,15 +469,33 @@ public class UnmappedInventoryService {
      * @param username User performing the mapping
      * @return Optional containing the mapped unmapped inventory
      */
+    @Transactional(timeout = 120)
     public Optional<UnmappedActiveInventory> mapActiveInventoryBySerialNumber(String serialNumber, String username) {
         logger.info("Looking up active inventory with serial number: {}", serialNumber);
 
-        List<ActiveInventory> activeInventoryOpt = activeInventoryRepository.findBySerialNumber(serialNumber);
-        if (activeInventoryOpt.isEmpty()) {
+        // Check for duplicates in main inventory
+        List<ActiveInventory> activeInventoryList = retryOperation(
+                () -> activeInventoryRepository.findBySerialNumber(serialNumber),
+                "findActiveBySerialNumber"
+        );
+        if (activeInventoryList.size() > 1) {
+            return Optional.empty(); // Silently skip duplicates
+        }
+        if (activeInventoryList.isEmpty()) {
+            logger.info("No active inventory found for serial number: {}", serialNumber);
             return Optional.empty();
         }
 
-        return Optional.of(mapActiveInventory(activeInventoryOpt.get(0), username));
+        // Check if already in unmapped inventory
+        boolean alreadyUnmapped = retryOperation(
+                () -> unmappedActiveRepository.findBySerialNumber(serialNumber).isPresent(),
+                "checkUnmappedActive"
+        );
+        if (alreadyUnmapped) {
+            return Optional.empty(); // Silently skip already unmapped
+        }
+
+        return Optional.ofNullable(mapActiveInventory(activeInventoryList.get(0), username));
     }
 
     /**
@@ -378,15 +505,33 @@ public class UnmappedInventoryService {
      * @param username User performing the mapping
      * @return Optional containing the mapped unmapped inventory
      */
+    @Transactional(timeout = 120)
     public Optional<UnmappedPassiveInventory> mapPassiveInventoryByIdentifier(String identifier, String username) {
         logger.info("Looking up passive inventory with identifier: {}", identifier);
 
-        List<PassiveInventory> passiveList = passiveInventoryRepository.findByObjectIdOrSerialNumber(identifier, identifier);
+        // Check for duplicates in main inventory
+        List<PassiveInventory> passiveList = retryOperation(
+                () -> passiveInventoryRepository.findByObjectIdOrSerialNumber(identifier, identifier),
+                "findPassiveByIdentifier"
+        );
+        if (passiveList.size() > 1) {
+            return Optional.empty(); // Silently skip duplicates
+        }
         if (passiveList.isEmpty()) {
+            logger.info("No passive inventory found for identifier: {}", identifier);
             return Optional.empty();
         }
 
-        return Optional.of(mapPassiveInventory(passiveList.get(0), username));
+        // Check if already in unmapped inventory
+        boolean alreadyUnmapped = retryOperation(
+                () -> unmappedPassiveRepository.findBySerialOrObjectId(identifier, identifier).isPresent(),
+                "checkUnmappedPassive"
+        );
+        if (alreadyUnmapped) {
+            return Optional.empty(); // Silently skip already unmapped
+        }
+
+        return Optional.ofNullable(mapPassiveInventory(passiveList.get(0), username));
     }
 
     /**
@@ -396,15 +541,33 @@ public class UnmappedInventoryService {
      * @param username User performing the mapping
      * @return Optional containing the mapped unmapped inventory
      */
+    @Transactional(timeout = 120)
     public Optional<UnmappedITInventory> mapITInventoryByIdentifier(String identifier, String username) {
         logger.info("Looking up IT inventory with identifier: {}", identifier);
 
-        List<ItInventory> itList = itInventoryRepository.findByObjectIdOrHostSerialNumber(identifier, identifier);
+        // Check for duplicates in main inventory
+        List<ItInventory> itList = retryOperation(
+                () -> itInventoryRepository.findByObjectIdOrHostSerialNumber(identifier, identifier),
+                "findITByIdentifier"
+        );
+        if (itList.size() > 1) {
+            return Optional.empty(); // Silently skip duplicates
+        }
         if (itList.isEmpty()) {
+            logger.info("No IT inventory found for identifier: {}", identifier);
             return Optional.empty();
         }
 
-        return Optional.of(mapITInventory(itList.get(0), username));
+        // Check if already in unmapped inventory
+        boolean alreadyUnmapped = retryOperation(
+                () -> unmappedITRepository.findByHardwareSerialNumber(identifier).isPresent(),
+                "checkUnmappedIT"
+        );
+        if (alreadyUnmapped) {
+            return Optional.empty(); // Silently skip already unmapped
+        }
+
+        return Optional.ofNullable(mapITInventory(itList.get(0), username));
     }
 
     /**
@@ -414,53 +577,68 @@ public class UnmappedInventoryService {
     @Scheduled(fixedRate = 3600000) // Run every hour
     public void scheduleUnmappedInventoryCheck() {
         logger.info("Starting scheduled unmapped inventory check...");
+        retryOperation(() -> {
+            // Check for unmapped active inventory
+            List<ActiveInventory> activeInventories = activeInventoryRepository.findAll();
+            for (ActiveInventory activeInventory : activeInventories) {
+                if (activeInventory == null) {
+                    logger.warn("Encountered null ActiveInventory in scheduled check");
+                    continue;
+                }
+                String serialNumber = activeInventory.getSerialNumber();
+                if (activeInventoryRepository.findBySerialNumber(serialNumber).size() > 1) {
+                    continue; // Silently skip duplicates
+                }
+                Optional<UnmappedActiveInventory> unmappedOpt = unmappedActiveRepository.findBySerialNumber(serialNumber);
+                if (unmappedOpt.isEmpty()) {
+                    logger.info("Found unmapped active inventory with serial number: {}", serialNumber);
+                    mapActiveInventory(activeInventory, "ScheduledJob");
+                }
+            }
 
-        // Check for unmapped active inventory
-        List<ActiveInventory> activeInventories = activeInventoryRepository.findAll();
-        for (ActiveInventory activeInventory : activeInventories) {
-            if (activeInventory == null) {
-                logger.warn("Encountered null ActiveInventory in scheduled check");
-                continue;
+            // Check for unmapped passive inventory
+            List<PassiveInventory> passiveInventories = passiveInventoryRepository.findAll();
+            if (passiveInventories.contains(null)) {
+                logger.warn("Passive inventory list contains null entries");
             }
-            Optional<UnmappedActiveInventory> unmappedOpt = unmappedActiveRepository.findBySerialNumber(activeInventory.getSerialNumber());
-            if (unmappedOpt.isEmpty()) {
-                logger.info("Found unmapped active inventory with serial number: {}", activeInventory.getSerialNumber());
-                mapActiveInventory(activeInventory, "ScheduledJob");
+            for (PassiveInventory passiveInventory : passiveInventories) {
+                if (passiveInventory == null) {
+                    logger.warn("Encountered null PassiveInventory in scheduled check");
+                    continue;
+                }
+                String serialNumber = passiveInventory.getSerial();
+                String objectId = passiveInventory.getObjectId().toString();
+                if (passiveInventoryRepository.findByObjectIdOrSerialNumber(objectId, serialNumber).size() > 1) {
+                    continue; // Silently skip duplicates
+                }
+                Optional<UnmappedPassiveInventory> unmappedOpt = unmappedPassiveRepository.findBySerialOrObjectId(serialNumber, objectId);
+                if (unmappedOpt.isEmpty()) {
+                    logger.info("Found unmapped passive inventory with serial number: {} or object ID: {}", serialNumber, objectId);
+                    mapPassiveInventory(passiveInventory, "ScheduledJob");
+                }
             }
-        }
 
-        // Check for unmapped passive inventory
-        List<PassiveInventory> passiveInventories = passiveInventoryRepository.findAll();
-        if (passiveInventories.contains(null)) {
-            logger.warn("Passive inventory list contains null entries");
-        }
-        for (PassiveInventory passiveInventory : passiveInventories) {
-            if (passiveInventory == null) {
-                logger.warn("Encountered null PassiveInventory in scheduled check");
-                continue;
+            // Check for unmapped IT inventory
+            List<ItInventory> itInventories = itInventoryRepository.findAll();
+            for (ItInventory itInventory : itInventories) {
+                if (itInventory == null) {
+                    logger.warn("Encountered null ItInventory in scheduled check");
+                    continue;
+                }
+                String serialNumber = itInventory.getHostSerialNumber();
+                if (itInventoryRepository.findByObjectIdOrHostSerialNumber(itInventory.getObjectId(), serialNumber).size() > 1) {
+                    continue; // Silently skip duplicates
+                }
+                Optional<UnmappedITInventory> unmappedOpt = unmappedITRepository.findByHardwareSerialNumber(serialNumber);
+                if (unmappedOpt.isEmpty()) {
+                    logger.info("Found unmapped IT inventory with serial number: {}", serialNumber);
+                    mapITInventory(itInventory, "ScheduledJob");
+                }
             }
-            Optional<UnmappedPassiveInventory> unmappedOpt = unmappedPassiveRepository.findBySerialOrObjectId(passiveInventory.getSerial(), passiveInventory.getObjectId().toString());
-            if (unmappedOpt.isEmpty()) {
-                logger.info("Found unmapped passive inventory with serial number: {} or object ID: {}", passiveInventory.getSerial(), passiveInventory.getObjectId());
-                mapPassiveInventory(passiveInventory, "ScheduledJob");
-            }
-        }
 
-        // Check for unmapped IT inventory
-        List<ItInventory> itInventories = itInventoryRepository.findAll();
-        for (ItInventory itInventory : itInventories) {
-            if (itInventory == null) {
-                logger.warn("Encountered null ItInventory in scheduled check");
-                continue;
-            }
-            Optional<UnmappedITInventory> unmappedOpt = unmappedITRepository.findByHardwareSerialNumber(itInventory.getHostSerialNumber());
-            if (unmappedOpt.isEmpty()) {
-                logger.info("Found unmapped IT inventory with serial number: {}", itInventory.getHostSerialNumber());
-                mapITInventory(itInventory, "ScheduledJob");
-            }
-        }
-
-        logger.info("Completed scheduled unmapped inventory check.");
+            logger.info("Completed scheduled unmapped inventory check.");
+            return null;
+        }, "scheduleUnmappedInventoryCheck");
     }
 
     /**
@@ -468,17 +646,23 @@ public class UnmappedInventoryService {
      */
     public void processUnmappedActiveInventory() {
         logger.info("Processing unmapped active inventory");
-
-        List<UnmappedActiveInventory> unmappedActiveList = unmappedActiveRepository.findAll();
+        List<UnmappedActiveInventory> unmappedActiveList = retryOperation(
+                () -> unmappedActiveRepository.findAll(),
+                "findAllUnmappedActive"
+        );
         for (UnmappedActiveInventory unmappedActive : unmappedActiveList) {
             String serialNumber = unmappedActive.getSerialNumber();
             if (serialNumber != null) {
-                List<ActiveInventory> existingActive = activeInventoryRepository.findBySerialNumber(serialNumber);
+                List<ActiveInventory> existingActive = retryOperation(
+                        () -> activeInventoryRepository.findBySerialNumber(serialNumber),
+                        "findActiveBySerialNumber"
+                );
+                if (existingActive.size() > 1) {
+                    continue; // Silently skip duplicates
+                }
                 if (existingActive.isEmpty()) {
                     logger.info("Mapping unmapped active inventory with serial number: {}", serialNumber);
                     mapActiveInventoryBySerialNumber(serialNumber, "SystemProcess");
-                } else {
-                    logger.debug("Active inventory with serial number {} already mapped, skipping", serialNumber);
                 }
             } else {
                 logger.warn("Skipping unmapped active inventory with null serial number");
@@ -491,18 +675,24 @@ public class UnmappedInventoryService {
      */
     public void processUnmappedPassiveInventory() {
         logger.info("Processing unmapped passive inventory");
-
-        List<UnmappedPassiveInventory> unmappedPassiveList = unmappedPassiveRepository.findAll();
+        List<UnmappedPassiveInventory> unmappedPassiveList = retryOperation(
+                () -> unmappedPassiveRepository.findAll(),
+                "findAllUnmappedPassive"
+        );
         for (UnmappedPassiveInventory unmappedPassive : unmappedPassiveList) {
             String serialNumber = unmappedPassive.getSerial();
             String objectId = unmappedPassive.getObjectId();
             if (serialNumber != null || objectId != null) {
-                List<PassiveInventory> existingPassive = passiveInventoryRepository.findByObjectIdOrSerialNumber(objectId, serialNumber);
+                List<PassiveInventory> existingPassive = retryOperation(
+                        () -> passiveInventoryRepository.findByObjectIdOrSerialNumber(objectId, serialNumber),
+                        "findPassiveByIdentifier"
+                );
+                if (existingPassive.size() > 1) {
+                    continue; // Silently skip duplicates
+                }
                 if (existingPassive.isEmpty()) {
                     logger.info("Mapping unmapped passive inventory with serial number: {} or object ID: {}", serialNumber, objectId);
                     mapPassiveInventoryByIdentifier(serialNumber != null ? serialNumber : objectId, "SystemProcess");
-                } else {
-                    logger.debug("Passive inventory with serial number {} or object ID {} already mapped, skipping", serialNumber, objectId);
                 }
             } else {
                 logger.warn("Skipping unmapped passive inventory with null serial number and object ID");
@@ -515,23 +705,35 @@ public class UnmappedInventoryService {
      */
     public void processUnmappedItInventory() {
         logger.info("Processing unmapped IT inventory");
-        Pageable pageable = PageRequest.of(0, 100); // Process in batches of 100
-        Page<UnmappedITInventory> page;
+        int pageNumber = 0;
+        int pageSize = 100; // Process in batches of 100
+        boolean hasNext = true;
 
-        do {
-            page = unmappedITRepository.findAll(pageable);
+        while (hasNext) {
+            Pageable pageable = PageRequest.of(pageNumber, pageSize);
+            Page<UnmappedITInventory> page = retryOperation(
+                    () -> unmappedITRepository.findAll(pageable),
+                    "findAllUnmappedIT"
+            );
             for (UnmappedITInventory unmappedIt : page.getContent()) {
                 String serialNumber = unmappedIt.getHardwareSerialNumber();
                 if (serialNumber != null) {
-                    List<ItInventory> existingIt = itInventoryRepository.findByObjectIdOrHostSerialNumber(unmappedIt.getElementId(), serialNumber);
+                    List<ItInventory> existingIt = retryOperation(
+                            () -> itInventoryRepository.findByObjectIdOrHostSerialNumber(unmappedIt.getElementId(), serialNumber),
+                            "findITByIdentifier"
+                    );
+                    if (existingIt.size() > 1) {
+                        continue; // Silently skip duplicates
+                    }
                     if (existingIt.isEmpty()) {
                         logger.info("Mapping unmapped IT inventory with serial number: {}", serialNumber);
                         mapITInventoryByIdentifier(serialNumber, "SystemProcess");
                     }
                 }
             }
-            pageable = page.nextPageable();
-        } while (page.hasNext());
+            hasNext = page.hasNext();
+            pageNumber++;
+        }
     }
 
     /**
@@ -552,7 +754,10 @@ public class UnmappedInventoryService {
             return cb.or(predicates.toArray(new Predicate[0]));
         };
 
-        return unmappedActiveRepository.findAll(spec, pageable);
+        return retryOperation(
+                () -> unmappedActiveRepository.findAll(spec, pageable),
+                "searchUnmappedActive"
+        );
     }
 
     /**
@@ -576,7 +781,10 @@ public class UnmappedInventoryService {
             return cb.or(predicates.toArray(new Predicate[0]));
         };
 
-        return unmappedPassiveRepository.findAll(spec, pageable);
+        return retryOperation(
+                () -> unmappedPassiveRepository.findAll(spec, pageable),
+                "searchUnmappedPassive"
+        );
     }
 
     /**
@@ -597,7 +805,9 @@ public class UnmappedInventoryService {
             return cb.or(predicates.toArray(new Predicate[0]));
         };
 
-        return unmappedITRepository.findAll(spec, pageable);
+        return retryOperation(
+                () -> unmappedITRepository.findAll(spec, pageable),
+                "searchUnmappedIT"
+        );
     }
-
 }

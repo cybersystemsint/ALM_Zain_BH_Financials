@@ -175,7 +175,7 @@ public class FinanceApprovalController {
                 tb_ApprovalWorkflow workflow = workflowOpt.get();
                 String currentStatus = workflow.getUPDATED_STATUS();
 
-                if ("REJECTED".equals(currentStatus) || "CANCELLED".equals(currentStatus)) {
+                if ("REJECTED".equals(currentStatus) || "CANCELLED".equals(currentStatus) || "APPROVED".equals(currentStatus)) {
                     failedWorkflows.add("Workflow " + workflowId + " is already " + currentStatus);
                     logger.info("Workflow ID {} skipped: already {}", workflowId, currentStatus);
                     continue;
@@ -249,7 +249,7 @@ public class FinanceApprovalController {
                 tb_ApprovalWorkflow workflow = workflowOpt.get();
                 String currentStatus = workflow.getUPDATED_STATUS();
 
-                if ("REJECTED".equals(currentStatus) || "CANCELLED".equals(currentStatus)) {
+                if ("REJECTED".equals(currentStatus) || "CANCELLED".equals(currentStatus) || "APPROVED".equals(currentStatus)) {
                     failedWorkflows.add("Workflow " + workflowId + " is already " + currentStatus);
                     logger.info("Workflow ID {} skipped: already {}", workflowId, currentStatus);
                     continue;
@@ -323,7 +323,7 @@ public class FinanceApprovalController {
                 tb_ApprovalWorkflow workflow = workflowOpt.get();
                 String currentStatus = workflow.getUPDATED_STATUS();
 
-                if ("CANCELLED".equals(currentStatus) || "REJECTED".equals(currentStatus)) {
+                if ("CANCELLED".equals(currentStatus) || "REJECTED".equals(currentStatus) || "APPROVED".equals(currentStatus)) {
                     failedWorkflows.add("Workflow " + workflowId + " is already " + currentStatus);
                     logger.info("Workflow ID {} skipped: already {}", workflowId, currentStatus);
                     continue;

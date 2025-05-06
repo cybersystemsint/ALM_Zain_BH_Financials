@@ -259,39 +259,64 @@ public class AssetSyncController {
     public CompletableFuture<Void> rebuildUnmappedInventoriesAsync() {
         logger.info("Rebuilding unmapped inventories");
 
+        // Clear all unmapped inventories
         unmappedActiveInventoryRepository.deleteAll();
         unmappedPassiveInventoryRepository.deleteAll();
         unmappedITInventoryRepository.deleteAll();
+        logger.info("Cleared all unmapped inventories");
 
+        // Track processed serials to avoid duplicates
+        Set<String> processedSerials = new HashSet<>();
+
+        // Process Active inventory
         Pageable pageable = PageRequest.of(0, BATCH_SIZE);
         long totalActive = activeInventoryRepository.count();
         int totalActivePages = (int) Math.ceil((double) totalActive / BATCH_SIZE);
+
         for (int page = 0; page < totalActivePages; page++) {
             pageable = PageRequest.of(page, BATCH_SIZE);
             List<ActiveInventory> batch = activeInventoryRepository.findAll(pageable).getContent();
-            List<String> serials = batch.stream().map(ActiveInventory::getSerialNumber)
-                    .filter(Objects::nonNull).collect(Collectors.toList());
+            List<String> serials = batch.stream()
+                    .map(ActiveInventory::getSerialNumber)
+                    .filter(Objects::nonNull)
+                    .filter(processedSerials::add) // Only include new serials
+                    .collect(Collectors.toList());
             processBatchForUnmapped(serials, "ACTIVE");
+            logger.debug("Processed Active unmapped batch {}/{}", page + 1, totalActivePages);
         }
 
+        // Process Passive inventory
+        processedSerials.clear();
         long totalPassive = passiveInventoryRepository.count();
         int totalPassivePages = (int) Math.ceil((double) totalPassive / BATCH_SIZE);
+
         for (int page = 0; page < totalPassivePages; page++) {
             pageable = PageRequest.of(page, BATCH_SIZE);
             List<PassiveInventory> batch = passiveInventoryRepository.findAll(pageable).getContent();
-            List<String> serials = batch.stream().map(PassiveInventory::getSerial)
-                    .filter(Objects::nonNull).collect(Collectors.toList());
+            List<String> serials = batch.stream()
+                    .map(PassiveInventory::getSerial)
+                    .filter(Objects::nonNull)
+                    .filter(processedSerials::add)
+                    .collect(Collectors.toList());
             processBatchForUnmapped(serials, "PASSIVE");
+            logger.debug("Processed Passive unmapped batch {}/{}", page + 1, totalPassivePages);
         }
 
+        // Process IT inventory
+        processedSerials.clear();
         long totalIt = itInventoryRepository.count();
         int totalItPages = (int) Math.ceil((double) totalIt / BATCH_SIZE);
+
         for (int page = 0; page < totalItPages; page++) {
             pageable = PageRequest.of(page, BATCH_SIZE);
             List<ItInventory> batch = itInventoryRepository.findAll(pageable).getContent();
-            List<String> serials = batch.stream().map(ItInventory::getHostSerialNumber)
-                    .filter(Objects::nonNull).collect(Collectors.toList());
+            List<String> serials = batch.stream()
+                    .map(ItInventory::getHostSerialNumber)
+                    .filter(Objects::nonNull)
+                    .filter(processedSerials::add)
+                    .collect(Collectors.toList());
             processBatchForUnmapped(serials, "IT");
+            logger.debug("Processed IT unmapped batch {}/{}", page + 1, totalItPages);
         }
 
         logger.info("Completed rebuilding unmapped inventories");
@@ -393,36 +418,14 @@ public class AssetSyncController {
                 String nodeType = asset.getNodeType().toUpperCase();
                 switch (nodeType) {
                     case "ACTIVE":
-                        Optional<UnmappedActiveInventory> activeRecord = unmappedActiveInventoryRepository.findBySerialNumber(serialNumber);
-                        // Check for multiple records
-                        long activeCount = unmappedActiveInventoryRepository.findAllBySerialNumber(serialNumber).size();
-                        if (activeCount > 1) {
-                            logger.warn("Multiple unmapped ACTIVE records found for asset {}, deleting first only", serialNumber);
-                        }
-                        activeRecord.ifPresent(record -> {
-                            unmappedActiveInventoryRepository.delete(record);
-                            logAudit(asset, "UNMAPPED", "MAPPED", "Asset " + serialNumber + " removed from unmapped ACTIVE inventory");
-                        });
+                        unmappedActiveInventoryRepository.deleteBySerialNumber(serialNumber);
                         break;
                     case "PASSIVE":
-                        Optional<UnmappedPassiveInventory> passiveRecord = unmappedPassiveInventoryRepository.findBySerialOrObjectId(serialNumber, serialNumber);
-                        // Check for multiple records
-                        boolean hasSerial = unmappedPassiveInventoryRepository.findBySerial(serialNumber).isPresent();
-                        boolean hasObjectId = unmappedPassiveInventoryRepository.findByObjectId(serialNumber).isPresent();
-                        if (hasSerial && hasObjectId) {
-                            logger.warn("Multiple unmapped PASSIVE records found for asset {} (matching both serial and objectId), deleting first only", serialNumber);
-                        }
-                        passiveRecord.ifPresent(record -> {
-                            unmappedPassiveInventoryRepository.delete(record);
-                            logAudit(asset, "UNMAPPED", "MAPPED", "Asset " + serialNumber + " removed from unmapped PASSIVE inventory");
-                        });
+                        unmappedPassiveInventoryRepository.deleteBySerial(serialNumber);
+                        unmappedPassiveInventoryRepository.deleteByObjectId(serialNumber);
                         break;
                     case "IT":
-                        Optional<UnmappedITInventory> itRecord = unmappedITInventoryRepository.findByHardwareSerialNumber(serialNumber);
-                        itRecord.ifPresent(record -> {
-                            unmappedITInventoryRepository.delete(record);
-                            logAudit(asset, "UNMAPPED", "MAPPED", "Asset " + serialNumber + " removed from unmapped IT inventory");
-                        });
+                        unmappedITInventoryRepository.deleteByHardwareSerialNumber(serialNumber);
                         break;
                     default:
                         logger.warn("Unknown nodeType {} for asset {}, skipping unmapped deletion", nodeType, serialNumber);
@@ -438,46 +441,32 @@ public class AssetSyncController {
         }
     }
 
-
     /**
      * Handle asset not found in FR (new data uploaded)
      */
     private void handleAssetNotInFR(String identifier, String type) {
-        boolean alreadyUnmapped = false;
         switch (type.toUpperCase()) {
             case "ACTIVE":
-                alreadyUnmapped = unmappedActiveInventoryRepository.findAllBySerialNumber(identifier)
-                        .stream().findFirst().isPresent();
-                if (!alreadyUnmapped) {
+                if (unmappedActiveInventoryRepository.findBySerialNumber(identifier).isEmpty()) {
                     unmappedInventoryService.mapActiveInventoryBySerialNumber(identifier, "SYSTEM");
-                    logger.info("Mapped asset {} to unmapped ACTIVE inventory", identifier);
                     logUnmappedAudit(identifier, type, "Asset " + identifier + " added to unmapped ACTIVE inventory");
                 }
                 break;
             case "PASSIVE":
-                alreadyUnmapped = unmappedPassiveInventoryRepository.findBySerialOrObjectId(identifier, identifier)
-                        .stream().findFirst().isPresent();
-                if (!alreadyUnmapped) {
+                if (unmappedPassiveInventoryRepository.findBySerialOrObjectId(identifier, identifier).isEmpty()) {
                     unmappedInventoryService.mapPassiveInventoryByIdentifier(identifier, "SYSTEM");
-                    logger.info("Mapped asset {} to unmapped PASSIVE inventory", identifier);
                     logUnmappedAudit(identifier, type, "Asset " + identifier + " added to unmapped PASSIVE inventory");
                 }
                 break;
             case "IT":
-                alreadyUnmapped = unmappedITInventoryRepository.findByHardwareSerialNumber(identifier)
-                        .stream().findFirst().isPresent();
-                if (!alreadyUnmapped) {
+                if (unmappedITInventoryRepository.findByHardwareSerialNumber(identifier).isEmpty()) {
                     unmappedInventoryService.mapITInventoryByIdentifier(identifier, "SYSTEM");
-                    logger.info("Mapped asset {} to unmapped IT inventory", identifier);
                     logUnmappedAudit(identifier, type, "Asset " + identifier + " added to unmapped IT inventory");
                 }
                 break;
             default:
                 logger.error("Unknown asset type {} for identifier {}", type, identifier);
                 return;
-        }
-        if (alreadyUnmapped) {
-            logger.info("Asset {} already exists in unmapped {} inventory", identifier, type);
         }
     }
 
@@ -560,7 +549,7 @@ public class AssetSyncController {
             return "PASSIVE";
         }
         if (!itInventoryRepository.findByObjectIdOrHostSerialNumber(identifier, identifier).isEmpty()) {
-            logger.warn("Asset {} determined as IT", identifier);
+            logger.info("Asset {} determined as IT", identifier);
             return "IT";
         }
         logger.warn("Asset {} not found in any inventory, defaulting to ACTIVE", identifier);
@@ -611,146 +600,7 @@ public class AssetSyncController {
         }
     }
 
-    /**
-     * Get a paginated list of unmapped assets
-     */
-    @GetMapping("/unmapped-assets")
-    public ResponseEntity<Map<String, Object>> getUnmappedAssets(
-            @RequestParam(defaultValue = "ALL") String type,
-            @RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "20") int size) {
-        logger.info("Getting unmapped assets of type: {}, page: {}, size: {}", type, page, size);
-        try {
-            Map<String, Object> response = new HashMap<>();
-            Pageable pageable = PageRequest.of(page, size, Sort.by("insertDate").descending());
 
-            switch (type.toUpperCase()) {
-                case "ACTIVE":
-                    Page<UnmappedActiveInventory> activeAssets = unmappedActiveInventoryRepository.findAll(pageable);
-                    response.put("assets", activeAssets.getContent());
-                    response.put("type", "ACTIVE");
-                    response.put("totalItems", activeAssets.getTotalElements());
-                    response.put("totalPages", activeAssets.getTotalPages());
-                    response.put("currentPage", activeAssets.getNumber());
-                    break;
-
-                case "PASSIVE":
-                    Page<UnmappedPassiveInventory> passiveAssets = unmappedPassiveInventoryRepository.findAll(pageable);
-                    response.put("assets", passiveAssets.getContent());
-                    response.put("type", "PASSIVE");
-                    response.put("totalItems", passiveAssets.getTotalElements());
-                    response.put("totalPages", passiveAssets.getTotalPages());
-                    response.put("currentPage", passiveAssets.getNumber());
-                    break;
-
-                case "IT":
-                    Page<UnmappedITInventory> itAssets = unmappedITInventoryRepository.findAll(pageable);
-                    response.put("assets", itAssets.getContent());
-                    response.put("type", "IT");
-                    response.put("totalItems", itAssets.getTotalElements());
-                    response.put("totalPages", itAssets.getTotalPages());
-                    response.put("currentPage", itAssets.getNumber());
-                    break;
-
-                case "ALL":
-                default:
-                    List<Object> combinedAssets = new ArrayList<>();
-                    Page<UnmappedActiveInventory> active = unmappedActiveInventoryRepository.findAll(pageable);
-                    active.getContent().forEach(asset -> {
-                        Map<String, Object> assetMap = new HashMap<>();
-                        assetMap.put("id", asset.getId());
-                        assetMap.put("serialNumber", asset.getSerialNumber());
-                        assetMap.put("assetType", "ACTIVE");
-                        assetMap.put("discoveredDate", asset.getInsertDate());
-                        combinedAssets.add(assetMap);
-                    });
-                    Page<UnmappedPassiveInventory> passive = unmappedPassiveInventoryRepository.findAll(pageable);
-                    passive.getContent().forEach(asset -> {
-                        Map<String, Object> assetMap = new HashMap<>();
-                        assetMap.put("id", asset.getObjectId());
-                        assetMap.put("objectId", asset.getObjectId());
-                        assetMap.put("serialNumber", asset.getSerial());
-                        assetMap.put("discoveredDate", asset.getEntryDate());
-                        assetMap.put("assetType", "PASSIVE");
-                        combinedAssets.add(assetMap);
-                    });
-                    Page<UnmappedITInventory> it = unmappedITInventoryRepository.findAll(pageable);
-                    it.getContent().forEach(asset -> {
-                        Map<String, Object> assetMap = new HashMap<>();
-                        assetMap.put("id", asset.getElementId());
-                        assetMap.put("objectId", asset.getElementId());
-                        assetMap.put("serialNumber", asset.getHostSerialNumber());
-                        assetMap.put("discoveredDate", asset.getAssetInsertDate());
-                        assetMap.put("assetType", "IT");
-                        combinedAssets.add(assetMap);
-                    });
-
-                    combinedAssets.sort((a, b) -> {
-                        Date dateA = (Date) ((Map<String, Object>) a).get("discoveredDate");
-                        Date dateB = (Date) ((Map<String, Object>) b).get("discoveredDate");
-                        return dateB.compareTo(dateA);
-                    });
-
-                    response.put("assets", combinedAssets);
-                    response.put("type", "ALL");
-
-                    long totalActive = unmappedActiveInventoryRepository.count();
-                    long totalPassive = unmappedPassiveInventoryRepository.count();
-                    long totalIt = unmappedITInventoryRepository.count();
-                    long totalItems = totalActive + totalPassive + totalIt;
-
-                    response.put("totalItems", totalItems);
-                    response.put("totalActive", totalActive);
-                    response.put("totalPassive", totalPassive);
-                    response.put("totalIt", totalIt);
-                    response.put("currentPage", page);
-                    response.put("totalPages", (int) Math.ceil(totalItems / (double) size));
-                    break;
-            }
-
-            response.put("status", "success");
-            response.put("timestamp", LocalDateTime.now());
-            return ResponseEntity.ok(response);
-        } catch (Exception e) {
-            logger.error("Error retrieving unmapped assets: ", e);
-            Map<String, Object> response = new HashMap<>();
-            response.put("status", "error");
-            response.put("message", "Error retrieving unmapped assets: " + e.getMessage());
-            response.put("timestamp", LocalDateTime.now());
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(response);
-        }
-    }
-
-    /**
-     * Get pending approvals for assets
-     */
-    @GetMapping("/pending-approvals")
-    public ResponseEntity<Map<String, Object>> getPendingApprovals(
-            @RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "20") int size) {
-        logger.info("Getting pending approvals, page: {}, size: {}", page, size);
-        try {
-            Map<String, Object> response = new HashMap<>();
-            Pageable pageable = PageRequest.of(page, size, Sort.by("insertDate").descending());
-
-            Page<ApprovalWorkflow> approvalsPage = approvalWorkflowRepository.findByUpdatedStatus("PENDING", pageable);
-
-            response.put("status", "success");
-            response.put("timestamp", LocalDateTime.now());
-            response.put("approvals", approvalsPage.getContent());
-            response.put("totalItems", approvalsPage.getTotalElements());
-            response.put("totalPages", approvalsPage.getTotalPages());
-            response.put("currentPage", approvalsPage.getNumber());
-            return ResponseEntity.ok(response);
-        } catch (Exception e) {
-            logger.error("Error retrieving pending approvals: ", e);
-            Map<String, Object> response = new HashMap<>();
-            response.put("status", "error");
-            response.put("message", "Error retrieving pending approvals: " + e.getMessage());
-            response.put("timestamp", LocalDateTime.now());
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(response);
-        }
-    }
 
     /**
      * Trigger approval workflow with specific original status

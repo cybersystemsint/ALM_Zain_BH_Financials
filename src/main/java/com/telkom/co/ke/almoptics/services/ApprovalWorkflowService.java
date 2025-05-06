@@ -60,7 +60,6 @@ public class ApprovalWorkflowService {
     @Autowired
     private UnmappedITInventoryRepository unmappedITInventoryRepository;
 
-
     @PersistenceContext
     private EntityManager entityManager;
 
@@ -118,7 +117,7 @@ public class ApprovalWorkflowService {
     }
 
     @Transactional
-    public tb_ApprovalWorkflow createDeletionWorkflow(tb_FinancialReport financialReport, String nodeType,String originalStatus) {
+    public tb_ApprovalWorkflow createDeletionWorkflow(tb_FinancialReport financialReport, String nodeType, String originalStatus) {
         logger.info("Creating deletion workflow for financial report ID: {}", financialReport.getId());
 
         String assetId = financialReport.getAssetName() != null && !financialReport.getAssetName().trim().isEmpty() ?
@@ -151,7 +150,7 @@ public class ApprovalWorkflowService {
         workflow.setInsertDate(LocalDateTime.now());
 
         financialReport.setStatusFlag("DECOMMISSIONED");
-        financialReport.setFinancialApprovalStatus("Pending L1 Approval");
+        financialReport.setFinancialApprovalStatus("Pending");
         financialReportRepo.save(financialReport);
 
         ApprovalWorkflow savedWorkflow = approvalWorkflowRepository.save(workflow);
@@ -200,32 +199,32 @@ public class ApprovalWorkflowService {
                 logger.info("Deleted unmapped active inventory for identifier: {}", identifier);
             }
             // Delete from passive inventory
-            else if (unmappedPassiveInventoryRepository.findBySerial(identifier).isPresent()) {
+            if (unmappedPassiveInventoryRepository.findBySerial(identifier).isPresent()) {
                 unmappedPassiveInventoryRepository.deleteBySerial(identifier);
                 logger.info("Deleted unmapped passive inventory by serial for identifier: {}", identifier);
             }
-            else if (unmappedPassiveInventoryRepository.findByObjectId(identifier).isPresent()) {
+            if (unmappedPassiveInventoryRepository.findByObjectId(identifier).isPresent()) {
                 unmappedPassiveInventoryRepository.deleteByObjectId(identifier);
                 logger.info("Deleted unmapped passive inventory by objectId for identifier: {}", identifier);
             }
-            else if (unmappedPassiveInventoryRepository.findByElementType(identifier).isPresent()) {
+            if (unmappedPassiveInventoryRepository.findByElementType(identifier).isPresent()) {
                 unmappedPassiveInventoryRepository.deleteByElementType(identifier);
                 logger.info("Deleted unmapped passive inventory by elementType for identifier: {}", identifier);
             }
             // Delete from IT inventory
-            else if (unmappedITInventoryRepository.findByHostSerialNumber(identifier).isPresent()) {
+            if (unmappedITInventoryRepository.findByHostSerialNumber(identifier).isPresent()) {
                 unmappedITInventoryRepository.deleteByHostSerialNumber(identifier);
                 logger.info("Deleted unmapped IT inventory by hostSerialNumber for identifier: {}", identifier);
             }
-            else if (unmappedITInventoryRepository.findByHardwareSerialNumber(identifier).isPresent()) {
+            if (unmappedITInventoryRepository.findByHardwareSerialNumber(identifier).isPresent()) {
                 unmappedITInventoryRepository.deleteByHardwareSerialNumber(identifier);
                 logger.info("Deleted unmapped IT inventory by hardwareSerialNumber for identifier: {}", identifier);
             }
-            else if (unmappedITInventoryRepository.findByElementId(identifier).isPresent()) {
+            if (unmappedITInventoryRepository.findByElementId(identifier).isPresent()) {
                 unmappedITInventoryRepository.deleteByElementId(identifier);
                 logger.info("Deleted unmapped IT inventory by elementId for identifier: {}", identifier);
             }
-            else if (unmappedITInventoryRepository.findByHostName(identifier).isPresent()) {
+            if (unmappedITInventoryRepository.findByHostName(identifier).isPresent()) {
                 unmappedITInventoryRepository.deleteByHostName(identifier);
                 logger.info("Deleted unmapped IT inventory by hostName for identifier: {}", identifier);
             }
@@ -234,7 +233,6 @@ public class ApprovalWorkflowService {
             throw new RuntimeException("Failed to delete unmapped inventory for identifier: " + identifier, e);
         }
     }
-
 
     @Transactional
     public boolean approveWorkflow(Integer workflowId, String approverComments, String approvedBy) {
@@ -296,7 +294,7 @@ public class ApprovalWorkflowService {
                 sendApprovalNotification(convertToDto(workflow), "DELETED", serialNumber, nodeType);
             } else if ("pending movement".equals(originalStatus)) {
                 logger.info("Moving financial report ID {} to write-off", financialReport.getId());
-                financialReport.setFinancialApprovalStatus("WriteOff");
+                financialReport.setFinancialApprovalStatus("Approved");
                 financialReport.setStatusFlag(newStatusFlag);
                 financialReport.setChangeDate(java.sql.Timestamp.valueOf(LocalDateTime.now()));
                 financialReport.setChangedBy(approvedBy);
@@ -323,17 +321,18 @@ public class ApprovalWorkflowService {
 
                 financialReportRepo.save(financialReport);
 
-                // Delete from unmapped inventory using assetId or serialNumber
-                String identifier = workflow.getAssetId();
-                if (serialNumber != null && !serialNumber.trim().isEmpty()) {
-                    identifier = serialNumber;
-                }
-                try {
-                    deleteFromUnmappedInventory(identifier);
-                } catch (Exception e) {
-                    logger.error("Failed to delete unmapped inventory for identifier: {}", identifier, e);
-                    // Optionally, decide whether to fail the approval or continue
-                    // For now, log and continue to avoid blocking approval
+                // Delete from unmapped inventory for additions
+                if ("pending addition".equals(originalStatus)) {
+                    String identifier = workflow.getAssetId();
+                    if (serialNumber != null && !serialNumber.trim().isEmpty()) {
+                        identifier = serialNumber;
+                    }
+                    try {
+                        deleteFromUnmappedInventory(identifier);
+                    } catch (Exception e) {
+                        logger.error("Failed to delete unmapped inventory for identifier: {}", identifier, e);
+                        // Continue to allow approval even if deletion fails, but log the error
+                    }
                 }
 
                 logger.info("Saved financial report ID {}. New values: initialCost={}, assetSerialNumber={}",
@@ -362,7 +361,7 @@ public class ApprovalWorkflowService {
                     "\nApprover Comments: " + approverComments);
             approvalWorkflowRepository.save(workflow);
 
-            financialReport.setFinancialApprovalStatus(nextStatus);
+            financialReport.setFinancialApprovalStatus("Pending");
             financialReport.setStatusFlag(newStatusFlag);
             financialReport.setChangeDate(java.sql.Timestamp.valueOf(LocalDateTime.now()));
             financialReport.setChangedBy(approvedBy);
@@ -378,14 +377,11 @@ public class ApprovalWorkflowService {
                             ", Comments: " + approverComments
             );
             sendApprovalNotification(convertToDto(workflow), "APPROVAL_STEP", serialNumber, nodeType);
-//        }
         }
 
         logger.info("Workflow {} approved to status: {}", workflowId, nextStatus);
         return true;
     }
-
-
 
     @Transactional
     public boolean rejectWorkflow(Integer workflowId, String rejectionComments, String rejectedBy) {
@@ -408,9 +404,34 @@ public class ApprovalWorkflowService {
         String previousStatusFlag = financialReport.getStatusFlag();
         String serialNumber = financialReport.getAssetSerialNumber();
         String nodeType = financialReport.getNodeType();
+        String originalStatus = workflow.getOriginalStatus();
 
-        // Restore original state for pending modification or pending movement
-        if (("pending modification".equals(workflow.getOriginalStatus()) || "pending movement".equals(workflow.getOriginalStatus()))
+        // For additions, delete the financial report
+        if ("pending addition".equals(originalStatus)) {
+            logger.info("Deleting financial report ID {} due to rejection of addition", financialReport.getId());
+            financialReportRepo.delete(financialReport);
+            workflow.setUpdatedStatus("REJECTED");
+            workflow.setChangedBy(rejectedBy);
+            workflow.setChangeDate(LocalDateTime.now());
+            workflow.setComments((workflow.getComments() != null ? workflow.getComments() : "") +
+                    "\nRejection Reason: " + rejectionComments);
+            approvalWorkflowRepository.save(workflow);
+
+            createAuditLog(
+                    workflow.getAssetId(),
+                    serialNumber,
+                    nodeType,
+                    originalStatus,
+                    "REJECTED",
+                    "Financial report deleted due to rejection of addition. Rejected by: " + rejectedBy +
+                            ", Reason: " + rejectionComments
+            );
+            sendApprovalNotification(convertToDto(workflow), "REJECTED", serialNumber, nodeType);
+            return true;
+        }
+
+        // For modifications, movements, or deletions, restore original state
+        if (("pending modification".equals(originalStatus) || "pending movement".equals(originalStatus) || "pending deletion".equals(originalStatus))
                 && financialReport.getOriginalState() != null) {
             try {
                 Map<String, Object> originalState = objectMapper.readValue(financialReport.getOriginalState(), Map.class);
@@ -461,10 +482,19 @@ public class ApprovalWorkflowService {
                 financialReport.setItemBarCode((String) originalState.get("itemBarCode"));
                 financialReport.setRfid((String) originalState.get("rfid"));
                 financialReport.setInvoiceNumber((String) originalState.get("invoiceNumber"));
+
+                // For modifications, maintain Approved status
+                if ("pending modification".equals(originalStatus)) {
+                    financialReport.setFinancialApprovalStatus("Approved");
+                } else {
+                    financialReport.setFinancialApprovalStatus("Rejected");
+                }
             } catch (Exception e) {
                 logger.error("Failed to restore original state for report ID: {}", financialReport.getId(), e);
                 return false;
             }
+        } else {
+            financialReport.setFinancialApprovalStatus("Rejected");
         }
 
         workflow.setUpdatedStatus("REJECTED");
@@ -474,8 +504,7 @@ public class ApprovalWorkflowService {
                 "\nRejection Reason: " + rejectionComments);
         approvalWorkflowRepository.save(workflow);
 
-        String newStatusFlag = determineStatusFlag(financialReport, previousStatusFlag, "REJECTED", workflow.getOriginalStatus());
-        financialReport.setFinancialApprovalStatus("Rejected");
+        String newStatusFlag = determineStatusFlag(financialReport, previousStatusFlag, "REJECTED", originalStatus);
         financialReport.setStatusFlag(newStatusFlag);
         financialReport.setOriginalState(null);
         financialReport.setChangeDate(java.sql.Timestamp.valueOf(LocalDateTime.now()));
@@ -486,8 +515,8 @@ public class ApprovalWorkflowService {
                 workflow.getAssetId(),
                 serialNumber,
                 nodeType,
-                workflow.getOriginalStatus(),
-                "Rejected",
+                originalStatus,
+                "REJECTED",
                 "Approval workflow rejected. Rejected by: " + rejectedBy +
                         ", Reason: " + rejectionComments
         );
@@ -517,9 +546,34 @@ public class ApprovalWorkflowService {
         String previousStatusFlag = financialReport.getStatusFlag();
         String serialNumber = financialReport.getAssetSerialNumber();
         String nodeType = financialReport.getNodeType();
+        String originalStatus = workflow.getOriginalStatus();
 
-        // Restore original state for pending modification or pending movement
-        if (("pending modification".equals(workflow.getOriginalStatus()) || "pending movement".equals(workflow.getOriginalStatus()))
+        // For additions, delete the financial report
+        if ("pending addition".equals(originalStatus)) {
+            logger.info("Deleting financial report ID {} due to cancellation of addition", financialReport.getId());
+            financialReportRepo.delete(financialReport);
+            workflow.setUpdatedStatus("CANCELLED");
+            workflow.setChangedBy(cancelledBy);
+            workflow.setChangeDate(LocalDateTime.now());
+            workflow.setComments((workflow.getComments() != null ? workflow.getComments() : "") +
+                    "\nCancel Reason: " + cancelComments);
+            approvalWorkflowRepository.save(workflow);
+
+            createAuditLog(
+                    workflow.getAssetId(),
+                    serialNumber,
+                    nodeType,
+                    originalStatus,
+                    "CANCELLED",
+                    "Financial report deleted due to cancellation of addition. Cancelled by: " + cancelledBy +
+                            ", Reason: " + cancelComments
+            );
+            sendApprovalNotification(convertToDto(workflow), "CANCELLED", serialNumber, nodeType);
+            return true;
+        }
+
+        // For modifications, movements, or deletions, restore original state
+        if (("pending modification".equals(originalStatus) || "pending movement".equals(originalStatus) || "pending deletion".equals(originalStatus))
                 && financialReport.getOriginalState() != null) {
             try {
                 Map<String, Object> originalState = objectMapper.readValue(financialReport.getOriginalState(), Map.class);
@@ -570,10 +624,19 @@ public class ApprovalWorkflowService {
                 financialReport.setItemBarCode((String) originalState.get("itemBarCode"));
                 financialReport.setRfid((String) originalState.get("rfid"));
                 financialReport.setInvoiceNumber((String) originalState.get("invoiceNumber"));
+
+                // For modifications, maintain Approved status
+                if ("pending modification".equals(originalStatus)) {
+                    financialReport.setFinancialApprovalStatus("Approved");
+                } else {
+                    financialReport.setFinancialApprovalStatus("Cancelled");
+                }
             } catch (Exception e) {
                 logger.error("Failed to restore original state for report ID: {}", financialReport.getId(), e);
                 return false;
             }
+        } else {
+            financialReport.setFinancialApprovalStatus("Cancelled");
         }
 
         workflow.setUpdatedStatus("CANCELLED");
@@ -583,8 +646,7 @@ public class ApprovalWorkflowService {
                 "\nCancel Reason: " + cancelComments);
         approvalWorkflowRepository.save(workflow);
 
-        String newStatusFlag = determineStatusFlag(financialReport, previousStatusFlag, "CANCELLED", workflow.getOriginalStatus());
-        financialReport.setFinancialApprovalStatus("Cancelled");
+        String newStatusFlag = determineStatusFlag(financialReport, previousStatusFlag, "CANCELLED", originalStatus);
         financialReport.setStatusFlag(newStatusFlag);
         financialReport.setOriginalState(null);
         financialReport.setChangeDate(java.sql.Timestamp.valueOf(LocalDateTime.now()));
@@ -595,8 +657,8 @@ public class ApprovalWorkflowService {
                 workflow.getAssetId(),
                 serialNumber,
                 nodeType,
-                workflow.getOriginalStatus(),
-                "Cancelled",
+                originalStatus,
+                "CANCELLED",
                 "Approval workflow cancelled. Cancelled by: " + cancelledBy +
                         ", Reason: " + cancelComments
         );
@@ -705,7 +767,7 @@ public class ApprovalWorkflowService {
                 : LocalDateTime.now();
         long daysSinceInsert = Duration.between(insertDate, LocalDateTime.now()).toDays();
 
-        if (daysSinceInsert < 30 && !"APPROVED".equals(nextWorkflowStatus)) {
+        if ("NEW".equals(currentStatusFlag) && daysSinceInsert < 30 && !"APPROVED".equals(nextWorkflowStatus)) {
             return "NEW";
         } else {
             return "EXISTING";

@@ -1213,6 +1213,9 @@ public class FinancialReportController {
             // Build Specification for dynamic query
             Specification<tb_FinancialReport> spec = (root, query, cb) -> {
                 List<Predicate> predicates = new ArrayList<>();
+                SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+
+                // Existing filters
                 if (filters.containsKey("l1") && !filters.get("l1").isEmpty()) {
                     predicates.add(cb.equal(root.get("l1"), filters.get("l1")));
                 }
@@ -1240,6 +1243,29 @@ public class FinancialReportController {
                 if (filters.containsKey("poNumber") && !filters.get("poNumber").isEmpty()) {
                     predicates.add(cb.equal(root.get("poNumber"), filters.get("poNumber")));
                 }
+
+                // New date range filters
+                try {
+                    if (filters.containsKey("insertDateStart") && !filters.get("insertDateStart").isEmpty()) {
+                        Date startDate = sdf.parse(filters.get("insertDateStart"));
+                        predicates.add(cb.greaterThanOrEqualTo(root.get("insertDate"), startDate));
+                    }
+                    if (filters.containsKey("insertDateEnd") && !filters.get("insertDateEnd").isEmpty()) {
+                        Date endDate = sdf.parse(filters.get("insertDateEnd"));
+                        predicates.add(cb.lessThanOrEqualTo(root.get("insertDate"), endDate));
+                    }
+                    if (filters.containsKey("changeDateStart") && !filters.get("changeDateStart").isEmpty()) {
+                        Date startDate = sdf.parse(filters.get("changeDateStart"));
+                        predicates.add(cb.greaterThanOrEqualTo(root.get("changeDate"), startDate));
+                    }
+                    if (filters.containsKey("changeDateEnd") && !filters.get("changeDateEnd").isEmpty()) {
+                        Date endDate = sdf.parse(filters.get("changeDateEnd"));
+                        predicates.add(cb.lessThanOrEqualTo(root.get("changeDate"), endDate));
+                    }
+                } catch (Exception e) {
+                    logger.error("Error parsing date filters", e);
+                }
+
                 return cb.and(predicates.toArray(new Predicate[0]));
             };
 

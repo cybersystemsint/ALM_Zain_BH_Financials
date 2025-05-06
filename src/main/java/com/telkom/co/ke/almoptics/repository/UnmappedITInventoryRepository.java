@@ -8,6 +8,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -26,6 +27,14 @@ public interface UnmappedITInventoryRepository
      * @return Optional containing the unmapped IT inventory if found.
      */
     Optional<UnmappedITInventory> findByHardwareSerialNumber(String hardwareSerialNumber);
+
+    /**
+     * Finds all unmapped IT inventory records by hardware serial number.
+     *
+     * @param hardwareSerialNumber The hardware serial number to search for.
+     * @return List of matching UnmappedITInventory records.
+     */
+    List<UnmappedITInventory> findAllByHardwareSerialNumber(String hardwareSerialNumber);
 
     /**
      * Finds an unmapped IT inventory by host serial number.

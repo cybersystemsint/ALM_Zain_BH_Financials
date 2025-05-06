@@ -22,6 +22,7 @@ import java.time.ZoneId;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
@@ -32,8 +33,10 @@ import java.util.stream.Collectors;
 public class AssetSyncService {
 
     private static final Logger logger = LoggerFactory.getLogger(AssetSyncService.class);
-    private static final int BATCH_SIZE = 500;
+    private static final int BATCH_SIZE = 200; // Reduced batch size to prevent timeouts
     private static final int MISSING_ASSET_GRACE_PERIOD_DAYS = 14;
+    private static final int MAX_RETRIES = 3;
+    private static final long BASE_BACKOFF_MS = 2000;
 
     @Autowired
     private FinancialReportRepo financialReportRepo;
@@ -72,6 +75,33 @@ public class AssetSyncService {
     private NotificationService notificationService;
 
     /**
+     * Custom retry logic for database operations
+     */
+    private <T> T retryOperation(Supplier<T> operation, String operationName) {
+        int attempt = 0;
+        while (attempt < MAX_RETRIES) {
+            try {
+                return operation.get();
+            } catch (Exception e) {
+                attempt++;
+                if (attempt >= MAX_RETRIES) {
+                    logger.error("Failed {} after {} attempts: {}", operationName, MAX_RETRIES, e.getMessage());
+                    throw e;
+                }
+                long backoff = BASE_BACKOFF_MS * (long) Math.pow(2, attempt);
+                logger.warn("Attempt {}/{} failed for {}, retrying after {}ms: {}", attempt, MAX_RETRIES, operationName, backoff, e.getMessage());
+                try {
+                    Thread.sleep(backoff);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("Interrupted during retry backoff", ie);
+                }
+            }
+        }
+        return null; // Unreachable
+    }
+
+    /**
      * Scheduled job to sync all assets daily at 1:00 AM
      */
     @Scheduled(cron = "0 0 1 * * ?")
@@ -86,11 +116,12 @@ public class AssetSyncService {
             CompletableFuture.allOf(missingSync, activeSync, passiveSync, itSync, unmappedSync).join();
             logger.info("Completed scheduled asset synchronization");
         } catch (Exception e) {
-            logger.error("Error during scheduled asset synchronization: ", e);
+            logger.error("Error during scheduled asset synchronization: {}", e.getMessage());
             notificationService.sendNotification(
                     "Asset Sync Error",
                     "Daily asset sync failed: " + e.getMessage()
             );
+            throw e;
         }
     }
 
@@ -98,155 +129,183 @@ public class AssetSyncService {
      * Async method to sync Active assets with batching
      */
     @Async
-    @Transactional
+    @Transactional(timeout = 120)
     public CompletableFuture<Void> syncActiveAssetsAsync() {
         logger.info("Starting async sync for Active assets");
-        Pageable pageable = PageRequest.of(0, BATCH_SIZE);
-        long totalRecords = activeInventoryRepository.count();
-        int totalPages = (int) Math.ceil((double) totalRecords / BATCH_SIZE);
+        return retryOperation(() -> {
+            Pageable pageable = PageRequest.of(0, BATCH_SIZE);
+            long totalRecords = activeInventoryRepository.count();
+            int totalPages = (int) Math.ceil((double) totalRecords / BATCH_SIZE);
 
-        for (int page = 0; page < totalPages; page++) {
-            pageable = PageRequest.of(page, BATCH_SIZE);
-            List<ActiveInventory> batch = activeInventoryRepository.findAll(pageable).getContent();
-            List<String> serials = batch.stream()
-                    .map(ActiveInventory::getSerialNumber)
-                    .filter(Objects::nonNull)
-                    .collect(Collectors.toList());
-            processBatchSync(serials, "ACTIVE");
-            logger.debug("Processed Active batch {}/{}", page + 1, totalPages);
-        }
-        logger.info("Completed async sync for Active assets");
-        return CompletableFuture.completedFuture(null);
+            for (int page = 0; page < totalPages; page++) {
+                pageable = PageRequest.of(page, BATCH_SIZE);
+                List<ActiveInventory> batch = activeInventoryRepository.findAll(pageable).getContent();
+                List<String> serials = batch.stream()
+                        .map(ActiveInventory::getSerialNumber)
+                        .filter(Objects::nonNull)
+                        .distinct()
+                        .collect(Collectors.toList());
+                processBatchSync(serials, "ACTIVE");
+            }
+            logger.info("Completed async sync for Active assets");
+            return CompletableFuture.completedFuture(null);
+        }, "syncActiveAssetsAsync");
     }
 
     /**
      * Async method to sync Passive assets with batching
      */
     @Async
-    @Transactional
+    @Transactional(timeout = 120)
     public CompletableFuture<Void> syncPassiveAssetsAsync() {
         logger.info("Starting async sync for Passive assets");
-        Pageable pageable = PageRequest.of(0, BATCH_SIZE);
-        long totalRecords = passiveInventoryRepository.count();
-        int totalPages = (int) Math.ceil((double) totalRecords / BATCH_SIZE);
+        return retryOperation(() -> {
+            Pageable pageable = PageRequest.of(0, BATCH_SIZE);
+            long totalRecords = passiveInventoryRepository.count();
+            int totalPages = (int) Math.ceil((double) totalRecords / BATCH_SIZE);
 
-        for (int page = 0; page < totalPages; page++) {
-            pageable = PageRequest.of(page, BATCH_SIZE);
-            List<PassiveInventory> batch = passiveInventoryRepository.findAll(pageable).getContent();
-            List<String> serials = batch.stream()
-                    .map(PassiveInventory::getSerial)
-                    .filter(Objects::nonNull)
-                    .collect(Collectors.toList());
-            processBatchSync(serials, "PASSIVE");
-            logger.debug("Processed Passive batch {}/{}", page + 1, totalPages);
-        }
-        logger.info("Completed async sync for Passive assets");
-        return CompletableFuture.completedFuture(null);
+            for (int page = 0; page < totalPages; page++) {
+                pageable = PageRequest.of(page, BATCH_SIZE);
+                List<PassiveInventory> batch = passiveInventoryRepository.findAll(pageable).getContent();
+                List<String> serials = batch.stream()
+                        .map(PassiveInventory::getSerial)
+                        .filter(Objects::nonNull)
+                        .distinct()
+                        .collect(Collectors.toList());
+                processBatchSync(serials, "PASSIVE");
+            }
+            logger.info("Completed async sync for Passive assets");
+            return CompletableFuture.completedFuture(null);
+        }, "syncPassiveAssetsAsync");
     }
 
     /**
      * Async method to sync IT assets with batching
      */
     @Async
-    @Transactional
+    @Transactional(timeout = 120)
     public CompletableFuture<Void> syncItAssetsAsync() {
         logger.info("Starting async sync for IT assets");
-        Pageable pageable = PageRequest.of(0, BATCH_SIZE);
-        long totalRecords = itInventoryRepository.count();
-        int totalPages = (int) Math.ceil((double) totalRecords / BATCH_SIZE);
+        return retryOperation(() -> {
+            Pageable pageable = PageRequest.of(0, BATCH_SIZE);
+            long totalRecords = itInventoryRepository.count();
+            int totalPages = (int) Math.ceil((double) totalRecords / BATCH_SIZE);
 
-        for (int page = 0; page < totalPages; page++) {
-            pageable = PageRequest.of(page, BATCH_SIZE);
-            List<ItInventory> batch = itInventoryRepository.findAll(pageable).getContent();
-            List<String> serials = batch.stream()
-                    .map(ItInventory::getHostSerialNumber)
-                    .filter(Objects::nonNull)
-                    .collect(Collectors.toList());
-            processBatchSync(serials, "IT");
-            logger.debug("Processed IT batch {}/{}", page + 1, totalPages);
-        }
-        logger.info("Completed async sync for IT assets");
-        return CompletableFuture.completedFuture(null);
+            for (int page = 0; page < totalPages; page++) {
+                pageable = PageRequest.of(page, BATCH_SIZE);
+                List<ItInventory> batch = itInventoryRepository.findAll(pageable).getContent();
+                List<String> serials = batch.stream()
+                        .map(ItInventory::getHostSerialNumber)
+                        .filter(Objects::nonNull)
+                        .distinct()
+                        .collect(Collectors.toList());
+                processBatchSync(serials, "IT");
+            }
+            logger.info("Completed async sync for IT assets");
+            return CompletableFuture.completedFuture(null);
+        }, "syncItAssetsAsync");
     }
 
     /**
      * Async method to sync missing assets and check decommissioning
      */
     @Async
-    @Transactional
+    @Transactional(timeout = 120)
     public CompletableFuture<Void> syncMissingAssetsAsync() {
         logger.info("Starting async sync for missing assets");
-        Pageable pageable = PageRequest.of(0, BATCH_SIZE);
-        long totalRecords = financialReportRepo.count();
-        int totalPages = (int) Math.ceil((double) totalRecords / BATCH_SIZE);
+        return retryOperation(() -> {
+            Pageable pageable = PageRequest.of(0, BATCH_SIZE);
+            long totalRecords = financialReportRepo.count();
+            int totalPages = (int) Math.ceil((double) totalRecords / BATCH_SIZE);
 
-        for (int page = 0; page < totalPages; page++) {
-            pageable = PageRequest.of(page, BATCH_SIZE);
-            List<tb_FinancialReport> batch = financialReportRepo.findAll(pageable).getContent();
-            batch.forEach(this::processFinancialReportAsset);
-        }
-        logger.info("Completed async sync for missing assets");
-        return CompletableFuture.completedFuture(null);
+            for (int page = 0; page < totalPages; page++) {
+                pageable = PageRequest.of(page, BATCH_SIZE);
+                List<tb_FinancialReport> batch = financialReportRepo.findAll(pageable).getContent();
+                batch.forEach(this::processFinancialReportAsset);
+            }
+            logger.info("Completed async sync for missing assets");
+            return CompletableFuture.completedFuture(null);
+        }, "syncMissingAssetsAsync");
     }
 
     /**
      * Rebuild unmapped inventories from scratch
      */
     @Async
-    @Transactional
+    @Transactional(timeout = 120)
     public CompletableFuture<Void> rebuildUnmappedInventoriesAsync() {
-        logger.info("Rebuilding unmapped inventories");
+        logger.info("Rebuilding unmapped inventories from scratch");
+        return retryOperation(() -> {
+            // Clear all existing unmapped records
+            logger.info("Clearing existing unmapped inventory records");
+            retryOperation(() -> {
+                unmappedActiveInventoryRepository.deleteAll();
+                return null;
+            }, "deleteAllUnmappedActive");
+            retryOperation(() -> {
+                unmappedPassiveInventoryRepository.deleteAll();
+                return null;
+            }, "deleteAllUnmappedPassive");
+            retryOperation(() -> {
+                unmappedITInventoryRepository.deleteAll();
+                return null;
+            }, "deleteAllUnmappedIT");
+            logAudit(null, null, "CLEAR", "CLEAR", null, "Cleared all unmapped inventory tables before rebuild");
 
-        unmappedActiveInventoryRepository.deleteAll();
-        unmappedPassiveInventoryRepository.deleteAll();
-        unmappedITInventoryRepository.deleteAll();
+            // Rebuild unmapped inventories
+            Pageable pageable = PageRequest.of(0, BATCH_SIZE);
+            long totalActive = activeInventoryRepository.count();
+            int totalActivePages = (int) Math.ceil((double) totalActive / BATCH_SIZE);
+            for (int page = 0; page < totalActivePages; page++) {
+                pageable = PageRequest.of(page, BATCH_SIZE);
+                List<ActiveInventory> batch = activeInventoryRepository.findAll(pageable).getContent();
+                List<String> serials = batch.stream()
+                        .map(ActiveInventory::getSerialNumber)
+                        .filter(Objects::nonNull)
+                        .distinct()
+                        .collect(Collectors.toList());
+                processBatchForUnmapped(serials, "ACTIVE");
+            }
 
-        Pageable pageable = PageRequest.of(0, BATCH_SIZE);
-        long totalActive = activeInventoryRepository.count();
-        int totalActivePages = (int) Math.ceil((double) totalActive / BATCH_SIZE);
-        for (int page = 0; page < totalActivePages; page++) {
-            pageable = PageRequest.of(page, BATCH_SIZE);
-            List<ActiveInventory> batch = activeInventoryRepository.findAll(pageable).getContent();
-            List<String> serials = batch.stream()
-                    .map(ActiveInventory::getSerialNumber)
-                    .filter(Objects::nonNull)
-                    .collect(Collectors.toList());
-            processBatchForUnmapped(serials, "ACTIVE");
-        }
+            long totalPassive = passiveInventoryRepository.count();
+            int totalPassivePages = (int) Math.ceil((double) totalPassive / BATCH_SIZE);
+            for (int page = 0; page < totalPassivePages; page++) {
+                pageable = PageRequest.of(page, BATCH_SIZE);
+                List<PassiveInventory> batch = passiveInventoryRepository.findAll(pageable).getContent();
+                List<String> serials = batch.stream()
+                        .map(PassiveInventory::getSerial)
+                        .filter(Objects::nonNull)
+                        .distinct()
+                        .collect(Collectors.toList());
+                processBatchForUnmapped(serials, "PASSIVE");
+            }
 
-        long totalPassive = passiveInventoryRepository.count();
-        int totalPassivePages = (int) Math.ceil((double) totalPassive / BATCH_SIZE);
-        for (int page = 0; page < totalPassivePages; page++) {
-            pageable = PageRequest.of(page, BATCH_SIZE);
-            List<PassiveInventory> batch = passiveInventoryRepository.findAll(pageable).getContent();
-            List<String> serials = batch.stream()
-                    .map(PassiveInventory::getSerial)
-                    .filter(Objects::nonNull)
-                    .collect(Collectors.toList());
-            processBatchForUnmapped(serials, "PASSIVE");
-        }
+            long totalIt = itInventoryRepository.count();
+            int totalItPages = (int) Math.ceil((double) totalIt / BATCH_SIZE);
+            for (int page = 0; page < totalItPages; page++) {
+                pageable = PageRequest.of(page, BATCH_SIZE);
+                List<ItInventory> batch = itInventoryRepository.findAll(pageable).getContent();
+                List<String> serials = batch.stream()
+                        .map(ItInventory::getHostSerialNumber)
+                        .filter(Objects::nonNull)
+                        .distinct()
+                        .collect(Collectors.toList());
+                processBatchForUnmapped(serials, "IT");
+            }
 
-        long totalIt = itInventoryRepository.count();
-        int totalItPages = (int) Math.ceil((double) totalIt / BATCH_SIZE);
-        for (int page = 0; page < totalItPages; page++) {
-            pageable = PageRequest.of(page, BATCH_SIZE);
-            List<ItInventory> batch = itInventoryRepository.findAll(pageable).getContent();
-            List<String> serials = batch.stream()
-                    .map(ItInventory::getHostSerialNumber)
-                    .filter(Objects::nonNull)
-                    .collect(Collectors.toList());
-            processBatchForUnmapped(serials, "IT");
-        }
-
-        logger.info("Completed rebuilding unmapped inventories");
-        return CompletableFuture.completedFuture(null);
+            logger.info("Completed rebuilding unmapped inventories");
+            return CompletableFuture.completedFuture(null);
+        }, "rebuildUnmappedInventoriesAsync");
     }
 
     /**
      * Process a batch of assets for synchronization
      */
     private void processBatchSync(List<String> identifiers, String type) {
-        List<tb_FinancialReport> frAssets = financialReportRepo.findByAssetSerialNumberIn(identifiers);
+        List<tb_FinancialReport> frAssets = retryOperation(
+                () -> financialReportRepo.findByAssetSerialNumberIn(identifiers),
+                "findByAssetSerialNumberIn"
+        );
         Set<String> frSerials = frAssets.stream()
                 .map(tb_FinancialReport::getAssetSerialNumber)
                 .collect(Collectors.toSet());
@@ -264,7 +323,10 @@ public class AssetSyncService {
      * Process a batch for unmapped inventory rebuilding
      */
     private void processBatchForUnmapped(List<String> identifiers, String type) {
-        List<tb_FinancialReport> frAssets = financialReportRepo.findByAssetSerialNumberIn(identifiers);
+        List<tb_FinancialReport> frAssets = retryOperation(
+                () -> financialReportRepo.findByAssetSerialNumberIn(identifiers),
+                "findByAssetSerialNumberIn"
+        );
         Set<String> frSerials = frAssets.stream()
                 .map(tb_FinancialReport::getAssetSerialNumber)
                 .collect(Collectors.toSet());
@@ -300,10 +362,16 @@ public class AssetSyncService {
                 String previousStatus = asset.getStatusFlag();
                 asset.setStatusFlag(newStatus);
                 asset.setChangeDate(Timestamp.valueOf(now));
-                financialReportRepo.save(asset);
+                retryOperation(() -> {
+                    financialReportRepo.save(asset);
+                    return null;
+                }, "saveFinancialReport");
                 logAudit(asset, previousStatus, newStatus, "Status updated based on days since insert");
             }
         }
+
+        // Remove from unmapped inventory if present
+        removeFromUnmappedInventory(asset.getAssetSerialNumber(), asset.getNodeType());
 
         // Check for missing assets every 14 days
         LocalDateTime lastChangeDate = changeDateRaw != null
@@ -315,7 +383,10 @@ public class AssetSyncService {
                 // Mark as potentially missing if not already marked
                 if (asset.getRetirementDate() == null) {
                     asset.setRetirementDate(Timestamp.valueOf(now));
-                    financialReportRepo.save(asset);
+                    retryOperation(() -> {
+                        financialReportRepo.save(asset);
+                        return null;
+                    }, "saveFinancialReport");
                     logAudit(asset, asset.getStatusFlag(), "POTENTIALLY_MISSING",
                             "Asset not found in inventories - starting 14-day tracking period");
                     sendMissingAssetNotification(asset, false);
@@ -328,7 +399,10 @@ public class AssetSyncService {
                         String previousStatus = asset.getStatusFlag();
                         asset.setStatusFlag("DECOMMISSIONED");
                         asset.setChangeDate(Timestamp.valueOf(now));
-                        financialReportRepo.save(asset);
+                        retryOperation(() -> {
+                            financialReportRepo.save(asset);
+                            return null;
+                        }, "saveFinancialReport");
                         logAudit(asset, previousStatus, "DECOMMISSIONED",
                                 "Asset marked as DECOMMISSIONED after being missing for " + MISSING_ASSET_GRACE_PERIOD_DAYS + " days");
                         sendMissingAssetNotification(asset, true);
@@ -339,19 +413,24 @@ public class AssetSyncService {
                 if (asset.getRetirementDate() != null) {
                     String previousStatus = asset.getStatusFlag();
                     asset.setRetirementDate(null);
-                    financialReportRepo.save(asset);
+                    asset.setChangeDate(Timestamp.valueOf(now));
+                    retryOperation(() -> {
+                        financialReportRepo.save(asset);
+                        return null;
+                    }, "saveFinancialReport");
                     logAudit(asset, "POTENTIALLY_MISSING", previousStatus,
                             "Asset previously marked as missing has been found - tracking period reset");
                 }
-                // Remove from unmapped inventory
-                removeFromUnmappedInventory(asset.getAssetSerialNumber(), asset.getNodeType());
                 // Trigger workflow for DECOMMISSIONED assets with non-zero netCost
                 if ("DECOMMISSIONED".equals(asset.getStatusFlag()) && asset.getNetCost() != null && !BigDecimal.ZERO.equals(asset.getNetCost())) {
                     triggerApprovalWorkflow(asset, "pending addition");
                 }
             }
             asset.setChangeDate(Timestamp.valueOf(now));
-            financialReportRepo.save(asset);
+            retryOperation(() -> {
+                financialReportRepo.save(asset);
+                return null;
+            }, "saveFinancialReport");
         }
     }
 
@@ -361,45 +440,35 @@ public class AssetSyncService {
     private void removeFromUnmappedInventory(String serialNumber, String nodeType) {
         switch (nodeType.toUpperCase()) {
             case "ACTIVE":
-                List<UnmappedActiveInventory> activeRecords = unmappedActiveInventoryRepository.findAllBySerialNumber(serialNumber);
-                if (activeRecords.size() > 1) {
-                    logger.warn("Multiple unmapped ACTIVE records found for asset {}, deleting all", serialNumber);
+                if (unmappedActiveInventoryRepository.findBySerialNumber(serialNumber).isPresent()) {
+                    retryOperation(() -> {
+                        unmappedActiveInventoryRepository.deleteBySerialNumber(serialNumber);
+                        return null;
+                    }, "deleteUnmappedActive");
+                    logAudit(null, serialNumber, "UNMAPPED", "MAPPED", nodeType,
+                            "Asset " + serialNumber + " removed from unmapped ACTIVE inventory");
                 }
-                activeRecords.forEach(record -> {
-                    unmappedActiveInventoryRepository.delete(record);
-                    logAudit(null, serialNumber, "UNMAPPED", "MAPPED",
-                            nodeType, "Asset " + serialNumber + " removed from unmapped ACTIVE inventory");
-                });
                 break;
             case "PASSIVE":
-                // Check for multiple records using findBySerial and findByObjectId
-                List<UnmappedPassiveInventory> passiveRecords = new ArrayList<>();
-                Optional<UnmappedPassiveInventory> bySerial = unmappedPassiveInventoryRepository.findBySerial(serialNumber);
-                Optional<UnmappedPassiveInventory> byObjectId = unmappedPassiveInventoryRepository.findByObjectId(serialNumber);
-                bySerial.ifPresent(passiveRecords::add);
-                byObjectId.ifPresent(record -> {
-                    if (!passiveRecords.contains(record)) {
-                        passiveRecords.add(record);
-                    }
-                });
-                if (passiveRecords.size() > 1) {
-                    logger.warn("Multiple unmapped PASSIVE records found for asset {}, deleting all", serialNumber);
-                }
-                if (!passiveRecords.isEmpty()) {
-                    // Delete by serial and objectId to cover all matching records
-                    unmappedPassiveInventoryRepository.deleteBySerial(serialNumber);
-                    unmappedPassiveInventoryRepository.deleteByObjectId(serialNumber);
+                if (unmappedPassiveInventoryRepository.findBySerialOrObjectId(serialNumber, serialNumber).isPresent()) {
+                    retryOperation(() -> {
+                        unmappedPassiveInventoryRepository.deleteBySerial(serialNumber);
+                        unmappedPassiveInventoryRepository.deleteByObjectId(serialNumber);
+                        return null;
+                    }, "deleteUnmappedPassive");
                     logAudit(null, serialNumber, "UNMAPPED", "MAPPED", nodeType,
                             "Asset " + serialNumber + " removed from unmapped PASSIVE inventory");
                 }
                 break;
             case "IT":
-                Optional<UnmappedITInventory> itRecord = unmappedITInventoryRepository.findByHardwareSerialNumber(serialNumber);
-                itRecord.ifPresent(record -> {
-                    unmappedITInventoryRepository.delete(record);
-                    logAudit(null, serialNumber, "UNMAPPED", "MAPPED",
-                            nodeType, "Asset " + serialNumber + " removed from unmapped IT inventory");
-                });
+                if (unmappedITInventoryRepository.findByHardwareSerialNumber(serialNumber).isPresent()) {
+                    retryOperation(() -> {
+                        unmappedITInventoryRepository.deleteByHardwareSerialNumber(serialNumber);
+                        return null;
+                    }, "deleteUnmappedIT");
+                    logAudit(null, serialNumber, "UNMAPPED", "MAPPED", nodeType,
+                            "Asset " + serialNumber + " removed from unmapped IT inventory");
+                }
                 break;
             default:
                 logger.warn("Unknown nodeType {} for asset {}, skipping unmapped deletion", nodeType, serialNumber);
@@ -410,10 +479,16 @@ public class AssetSyncService {
      * Handle asset not found in Financial Report
      */
     private void handleAssetNotInFinancialReport(String identifier, String type) {
+        // Check for duplicates in main inventory
+        boolean hasDuplicates = checkForInventoryDuplicates(identifier, type);
+        if (hasDuplicates) {
+            return; // Silently skip duplicates
+        }
+
         boolean alreadyUnmapped = false;
         switch (type.toUpperCase()) {
             case "ACTIVE":
-                alreadyUnmapped = !unmappedActiveInventoryRepository.findAllBySerialNumber(identifier).isEmpty();
+                alreadyUnmapped = unmappedActiveInventoryRepository.findBySerialNumber(identifier).isPresent();
                 if (!alreadyUnmapped) {
                     unmappedInventoryService.mapActiveInventoryBySerialNumber(identifier, "SYSTEM");
                     logAudit(null, identifier, "UNKNOWN", "UNMAPPED", type,
@@ -440,8 +515,31 @@ public class AssetSyncService {
                 logger.error("Unknown asset type {} for identifier {}", type, identifier);
                 return;
         }
-        if (alreadyUnmapped) {
-            logger.info("Asset {} already exists in unmapped {} inventory", identifier, type);
+    }
+
+    /**
+     * Check for duplicate serial numbers in main inventory tables
+     */
+    private boolean checkForInventoryDuplicates(String identifier, String type) {
+        switch (type.toUpperCase()) {
+            case "ACTIVE":
+                return retryOperation(
+                        () -> activeInventoryRepository.findBySerialNumber(identifier).size() > 1,
+                        "checkActiveDuplicates"
+                );
+            case "PASSIVE":
+                return retryOperation(
+                        () -> passiveInventoryRepository.findByObjectIdOrSerialNumber(identifier, identifier).size() > 1,
+                        "checkPassiveDuplicates"
+                );
+            case "IT":
+                return retryOperation(
+                        () -> itInventoryRepository.findByObjectIdOrHostSerialNumber(identifier, identifier).size() > 1,
+                        "checkITDuplicates"
+                );
+            default:
+                logger.warn("Unknown type {} for duplicate check", type);
+                return false;
         }
     }
 
@@ -454,11 +552,20 @@ public class AssetSyncService {
         }
         switch (nodeType.toUpperCase()) {
             case "ACTIVE":
-                return !activeInventoryRepository.findBySerialNumber(identifier).isEmpty();
+                return retryOperation(
+                        () -> !activeInventoryRepository.findBySerialNumber(identifier).isEmpty(),
+                        "checkActiveInventory"
+                );
             case "PASSIVE":
-                return !passiveInventoryRepository.findByObjectIdOrSerialNumber(identifier, identifier).isEmpty();
+                return retryOperation(
+                        () -> !passiveInventoryRepository.findByObjectIdOrSerialNumber(identifier, identifier).isEmpty(),
+                        "checkPassiveInventory"
+                );
             case "IT":
-                return !itInventoryRepository.findByObjectIdOrHostSerialNumber(identifier, identifier).isEmpty();
+                return retryOperation(
+                        () -> !itInventoryRepository.findByObjectIdOrHostSerialNumber(identifier, identifier).isEmpty(),
+                        "checkITInventory"
+                );
             default:
                 logger.warn("Unknown nodeType {} for identifier {}", nodeType, identifier);
                 return false;
@@ -469,27 +576,37 @@ public class AssetSyncService {
      * Trigger approval workflow with specific original status
      */
     private void triggerApprovalWorkflow(tb_FinancialReport asset, String originalStatus) {
-        Optional<ApprovalWorkflow> existingWorkflow = approvalWorkflowRepository.findByAssetIdAndUpdatedStatus(
-                asset.getId().toString(), "Pending Addition");
+        Optional<ApprovalWorkflow> existingWorkflow = retryOperation(
+                () -> approvalWorkflowRepository.findByAssetIdAndUpdatedStatus(String.valueOf(asset.getId()), "Pending Addition"),
+                "findApprovalWorkflow"
+        );
         if (existingWorkflow.isPresent()) {
-            logger.info("Workflow already exists for asset {} with status Pending Addition", asset.getAssetSerialNumber());
-            return;
+            return; // Silently skip existing workflow
         }
 
         ApprovalWorkflow workflow = new ApprovalWorkflow();
-        workflow.setAssetId(asset.getAssetName().toString());
+        workflow.setAssetId(String.valueOf(asset.getId()));
         workflow.setObjectType(asset.getNodeType());
         workflow.setOriginalStatus(originalStatus);
         workflow.setUpdatedStatus("Pending Addition");
-        Integer maxProcessId = approvalWorkflowRepository.findMaxProcessId();
+        Integer maxProcessId = retryOperation(
+                () -> approvalWorkflowRepository.findMaxProcessId(),
+                "findMaxProcessId"
+        );
         workflow.setProcessId(maxProcessId != null ? maxProcessId + 1 : 1);
         workflow.setComments(getWorkflowComments(originalStatus));
         workflow.setInsertedBy("SYSTEM");
         workflow.setInsertDate(LocalDateTime.now());
-        approvalWorkflowRepository.save(workflow);
+        retryOperation(() -> {
+            approvalWorkflowRepository.save(workflow);
+            return null;
+        }, "saveApprovalWorkflow");
 
         asset.setFinancialApprovalStatus("Pending");
-        financialReportRepo.save(asset);
+        retryOperation(() -> {
+            financialReportRepo.save(asset);
+            return null;
+        }, "saveFinancialReport");
 
         logAudit(asset, asset.getStatusFlag(), originalStatus, "Workflow triggered: " + originalStatus);
     }
@@ -516,10 +633,12 @@ public class AssetSyncService {
      * Log audit entry
      */
     private void logAudit(tb_FinancialReport asset, String previousStatus, String newStatus, String notes) {
-        logAudit(asset, asset != null ? asset.getAssetSerialNumber() : null, previousStatus, newStatus, asset != null ? asset.getNodeType() : null, notes);
+        logAudit(asset, asset != null ? asset.getAssetSerialNumber() : null, previousStatus, newStatus,
+                asset != null ? asset.getNodeType() : null, notes);
     }
 
-    private void logAudit(tb_FinancialReport asset, String serialNumber, String previousStatus, String newStatus, String nodeType, String notes) {
+    private void logAudit(tb_FinancialReport asset, String serialNumber, String previousStatus, String newStatus,
+                          String nodeType, String notes) {
         AuditLog auditLog = new AuditLog();
         auditLog.setAssetId(asset != null ? String.valueOf(asset.getId()) : null);
         auditLog.setSerialNumber(serialNumber);
@@ -528,7 +647,10 @@ public class AssetSyncService {
         auditLog.setChangeDate(LocalDateTime.now());
         auditLog.setNodeType(nodeType);
         auditLog.setNotes(notes);
-        auditLogRepository.save(auditLog);
+        retryOperation(() -> {
+            auditLogRepository.save(auditLog);
+            return null;
+        }, "saveAuditLog");
     }
 
     /**
@@ -563,10 +685,13 @@ public class AssetSyncService {
     /**
      * Synchronizes active assets between inventory and financial report
      */
-    @Transactional
+    @Transactional(timeout = 120)
     public void syncActiveAssets() {
         logger.info("Syncing active assets");
-        List<ActiveInventory> activeAssets = activeInventoryRepository.findAll();
+        List<ActiveInventory> activeAssets = retryOperation(
+                () -> activeInventoryRepository.findAll(),
+                "findAllActiveInventory"
+        );
         for (ActiveInventory asset : activeAssets) {
             if (asset.getSerialNumber() != null) {
                 syncActiveAsset(asset.getSerialNumber());
@@ -579,10 +704,13 @@ public class AssetSyncService {
     /**
      * Synchronizes passive assets between inventory and financial report
      */
-    @Transactional
+    @Transactional(timeout = 120)
     public void syncPassiveAssets() {
         logger.info("Syncing passive assets");
-        List<PassiveInventory> passiveAssets = passiveInventoryRepository.findAll();
+        List<PassiveInventory> passiveAssets = retryOperation(
+                () -> passiveInventoryRepository.findAll(),
+                "findAllPassiveInventory"
+        );
         for (PassiveInventory asset : passiveAssets) {
             String objectId = asset.getObjectId();
             String objectIdStr = (objectId != null) ? String.valueOf(objectId) : null;
@@ -593,10 +721,13 @@ public class AssetSyncService {
     /**
      * Synchronizes IT assets between inventory and financial report
      */
-    @Transactional
+    @Transactional(timeout = 120)
     public void syncItAssets() {
         logger.info("Syncing IT assets");
-        List<ItInventory> itAssets = itInventoryRepository.findAll();
+        List<ItInventory> itAssets = retryOperation(
+                () -> itInventoryRepository.findAll(),
+                "findAllITInventory"
+        );
         for (ItInventory asset : itAssets) {
             syncPassiveOrItAsset(asset.getObjectId(), asset.getHostSerialNumber(), "IT");
         }
@@ -605,27 +736,32 @@ public class AssetSyncService {
     /**
      * Syncs active assets identified by serial number
      */
-    @Transactional
+    @Transactional(timeout = 120)
     public void syncActiveAsset(String serialNumber) {
         if (serialNumber == null) {
             logger.warn("Skipping active asset with null serialNumber");
             return;
         }
-        Optional<tb_FinancialReport> financialReportOpt = financialReportRepo.findByAssetSerialNumber(serialNumber);
+        Optional<tb_FinancialReport> financialReportOpt = retryOperation(
+                () -> financialReportRepo.findByAssetSerialNumber(serialNumber),
+                "findByAssetSerialNumber"
+        );
         processFinancialReportMatch(financialReportOpt, null, serialNumber, "ACTIVE");
     }
 
     /**
      * Syncs passive or IT assets identified by objectId and serialNumber
      */
-    @Transactional
+    @Transactional(timeout = 120)
     public void syncPassiveOrItAsset(String objectId, String serialNumber, String nodeType) {
         if (objectId == null && serialNumber == null) {
             logger.warn("Skipping {} asset with both null objectId and serialNumber", nodeType);
             return;
         }
-        Optional<tb_FinancialReport> financialReportOpt =
-                financialReportRepo.findByAssetNameOrAssetSerialNumberExact(objectId, serialNumber);
+        Optional<tb_FinancialReport> financialReportOpt = retryOperation(
+                () -> financialReportRepo.findByAssetNameOrAssetSerialNumberExact(objectId, serialNumber),
+                "findByAssetNameOrAssetSerialNumberExact"
+        );
         processFinancialReportMatch(financialReportOpt, objectId, serialNumber, nodeType);
     }
 
@@ -637,7 +773,6 @@ public class AssetSyncService {
         if (financialReportOpt.isPresent()) {
             processFinancialReportAsset(financialReportOpt.get());
         } else {
-            logger.info("Asset not found in Financial Report: {}", serialNumber != null ? serialNumber : objectId);
             handleAssetNotInFinancialReport(serialNumber, nodeType);
         }
     }
