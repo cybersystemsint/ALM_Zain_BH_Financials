@@ -1,5 +1,6 @@
 package com.telkom.co.ke.almoptics.repository;
 
+import com.telkom.co.ke.almoptics.entities.FinancialReportProjection;
 import com.telkom.co.ke.almoptics.entities.tb_FinancialReport;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -10,6 +11,7 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.math.BigDecimal;
+import java.util.Date;
 import java.util.List;
 import java.util.Optional;
 
@@ -47,12 +49,21 @@ public interface FinancialReportRepo extends JpaRepository<tb_FinancialReport, L
     Page<tb_FinancialReport> findByAssetNameOrAssetSerialNumber(@Param("query") String query, Pageable pageable);
 
     // New method for exact match by assetName or assetSerialNumber
+//    @Query("SELECT fr FROM tb_FinancialReport fr " +
+//            "WHERE (:assetName IS NULL OR fr.assetName = :assetName) " +
+//            "OR (:assetSerialNumber IS NULL OR fr.assetSerialNumber = :assetSerialNumber)")
+//    Optional<tb_FinancialReport> findByAssetNameOrAssetSerialNumberExact(
+//            @Param("assetName") String assetName,
+//            @Param("assetSerialNumber") String assetSerialNumber);
     @Query("SELECT fr FROM tb_FinancialReport fr " +
             "WHERE (:assetName IS NULL OR fr.assetName = :assetName) " +
             "OR (:assetSerialNumber IS NULL OR fr.assetSerialNumber = :assetSerialNumber)")
-    Optional<tb_FinancialReport> findByAssetNameOrAssetSerialNumberExact(
+    Optional<tb_FinancialReport> findByAssetNameOrAssetSerialNumber(
             @Param("assetName") String assetName,
             @Param("assetSerialNumber") String assetSerialNumber);
+
+    @Query("SELECT fr FROM tb_FinancialReport fr WHERE fr.assetName IN :identifiers OR fr.assetSerialNumber IN :identifiers")
+    List<tb_FinancialReport> findByAssetNameOrAssetSerialNumberIn(@Param("identifiers") List<String> identifiers);
 
     // New method for bulk serial number lookup
     @Query("SELECT fr FROM tb_FinancialReport fr WHERE fr.assetSerialNumber IN :serialNumbers")
@@ -90,5 +101,46 @@ public interface FinancialReportRepo extends JpaRepository<tb_FinancialReport, L
             @Param("netCost") BigDecimal netCost,
             Pageable pageable);
 
+    @Query("SELECT f FROM tb_FinancialReport f WHERE LOWER(f.assetName) LIKE LOWER(CONCAT('%', :query, '%')) " +
+            "OR LOWER(f.assetSerialNumber) LIKE LOWER(CONCAT('%', :query, '%'))")
+    List<tb_FinancialReport> findAllByAssetNameContainingIgnoreCaseOrAssetSerialNumberContainingIgnoreCase(String query);
 
+    @Query("SELECT fr FROM tb_FinancialReport fr " +
+            "WHERE fr.netCost > :netCost " +
+            "AND (:insertDate IS NULL OR fr.insertDate <= :insertDate) " +
+            "AND (:search IS NULL OR LOWER(fr.assetName) LIKE LOWER(CONCAT('%', :search, '%')) " +
+            "OR LOWER(fr.assetSerialNumber) LIKE LOWER(CONCAT('%', :search, '%')))")
+    Page<tb_FinancialReport> findByNetCostGreaterThanAndInsertDateBefore(
+            @Param("netCost") BigDecimal netCost,
+            @Param("insertDate") Date insertDate,
+            @Param("search") String search,
+            Pageable pageable);
+    @Query("SELECT r FROM tb_FinancialReport r WHERE (LOWER(r.assetName) LIKE LOWER(CONCAT('%', :search, '%')) OR LOWER(r.assetSerialNumber) LIKE LOWER(CONCAT('%', :search, '%'))) AND r.insertDate <= :endOfMonth")
+    Page<tb_FinancialReport> findByInsertDateBefore(Date endOfMonth, String search, Pageable pageable);
+
+    @Query("SELECT r.initialCost AS initialCost, r.salvageValue AS salvageValue, r.dateOfService AS dateOfService, r.usefulLifeMonths AS usefulLifeMonths, r.monthlyDepreciationAmount AS monthlyDepreciationAmount FROM tb_FinancialReport r WHERE (LOWER(r.assetName) LIKE LOWER(CONCAT('%', :search, '%')) OR LOWER(r.assetSerialNumber) LIKE LOWER(CONCAT('%', :search, '%'))) AND r.insertDate <= :endOfMonth")
+    List<FinancialReportProjection> findProjectionByInsertDateBefore(Date endOfMonth, String search);
+
+    @Query("SELECT COALESCE(SUM(r.initialCost), 0) FROM tb_FinancialReport r WHERE (LOWER(r.assetName) LIKE LOWER(CONCAT('%', :search, '%')) OR LOWER(r.assetSerialNumber) LIKE LOWER(CONCAT('%', :search, '%'))) AND r.insertDate <= :endOfMonth")
+    BigDecimal findTotalCostByInsertDateBefore(Date endOfMonth, String search);
+    @Query("SELECT COALESCE(SUM(r.accumulatedDepreciation), 0) FROM tb_FinancialReport r WHERE (LOWER(r.assetName) LIKE LOWER(CONCAT('%', :search, '%')) OR LOWER(r.assetSerialNumber) LIKE LOWER(CONCAT('%', :search, '%'))) AND r.insertDate <= :endOfMonth")
+    BigDecimal findTotalDepreciationByInsertDateBefore(Date endOfMonth, String search);
+
+    @Query("SELECT COALESCE(SUM(r.netCost), 0) FROM tb_FinancialReport r WHERE (LOWER(r.assetName) LIKE LOWER(CONCAT('%', :search, '%')) OR LOWER(r.assetSerialNumber) LIKE LOWER(CONCAT('%', :search, '%'))) AND r.insertDate <= :endOfMonth")
+    BigDecimal findTotalNBVByInsertDateBefore(Date endOfMonth, String search);
+
+    @Query("SELECT r FROM tb_FinancialReport r WHERE r.assetName IN :ids OR r.assetSerialNumber IN :ids")
+    List<tb_FinancialReport> findByAssetNameInOrAssetSerialNumberIn(@Param("ids") List<String> ids);
+    // Modified/Added queries in FinancialReportRepo.java (add these to the interface)
+    @Query("SELECT r FROM tb_FinancialReport r WHERE r.dateOfService <= :endOfMonth AND (LOWER(r.assetName) LIKE LOWER(CONCAT('%', :search, '%')) OR LOWER(r.assetSerialNumber) LIKE LOWER(CONCAT('%', :search, '%')))")
+    Page<tb_FinancialReport> findByDateOfServiceBefore(Date endOfMonth, String search, Pageable pageable);
+
+    @Query("SELECT COALESCE(SUM(r.initialCost), 0) FROM tb_FinancialReport r WHERE r.dateOfService <= :endOfMonth AND (LOWER(r.assetName) LIKE LOWER(CONCAT('%', :search, '%')) OR LOWER(r.assetSerialNumber) LIKE LOWER(CONCAT('%', :search, '%')))")
+    BigDecimal findTotalCostByDateOfServiceBefore(Date endOfMonth, String search);
+
+    @Query("SELECT COALESCE(SUM(r.accumulatedDepreciation), 0) FROM tb_FinancialReport r WHERE r.dateOfService <= :endOfMonth AND (LOWER(r.assetName) LIKE LOWER(CONCAT('%', :search, '%')) OR LOWER(r.assetSerialNumber) LIKE LOWER(CONCAT('%', :search, '%')))")
+    BigDecimal findTotalDepreciationByDateOfServiceBefore(Date endOfMonth, String search);
+
+    @Query("SELECT COALESCE(SUM(r.netCost), 0) FROM tb_FinancialReport r WHERE r.dateOfService <= :endOfMonth AND (LOWER(r.assetName) LIKE LOWER(CONCAT('%', :search, '%')) OR LOWER(r.assetSerialNumber) LIKE LOWER(CONCAT('%', :search, '%')))")
+    BigDecimal findTotalNBVByDateOfServiceBefore(Date endOfMonth, String search);
 }

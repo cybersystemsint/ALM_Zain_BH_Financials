@@ -44,8 +44,8 @@ public class MissingAssetCheckService {
     @Autowired
     private AuditLogRepository auditLogRepository;
 
-    @Autowired
-    private NotificationService notificationService;
+//    @Autowired
+//    private NotificationService notificationService;
 
     /**
      * Scheduled job to identify and track missing assets
@@ -299,7 +299,7 @@ public class MissingAssetCheckService {
                     " days, it will be automatically marked as DECOMMISSIONED.";
         }
 
-        notificationService.sendNotification(subject, message);
+//        notificationService.sendNotification(subject, message);
     }
 
 

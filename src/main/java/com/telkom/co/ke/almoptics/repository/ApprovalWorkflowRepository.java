@@ -1,17 +1,20 @@
+
 package com.telkom.co.ke.almoptics.repository;
 
-import com.telkom.co.ke.almoptics.models.ApprovalWorkflow; // Assuming this is the correct entity class
+import com.telkom.co.ke.almoptics.models.ApprovalWorkflow;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.util.List;
 import java.util.Optional;
 
 @Repository
-public interface ApprovalWorkflowRepository extends JpaRepository<ApprovalWorkflow, Integer> {
+public interface ApprovalWorkflowRepository extends JpaRepository<ApprovalWorkflow, Integer>, JpaSpecificationExecutor<ApprovalWorkflow> {
     List<ApprovalWorkflow> findByUpdatedStatus(String status);
     Optional<ApprovalWorkflow> findByAssetIdAndUpdatedStatus(String assetId, String status);
     List<ApprovalWorkflow> findByAssetIdOrderByInsertDateDesc(String assetId);
@@ -29,4 +32,9 @@ public interface ApprovalWorkflowRepository extends JpaRepository<ApprovalWorkfl
     Integer findMaxProcessId();
 
     boolean existsByProcessId(Integer processId);
+
+    @Query("SELECT w FROM ApprovalWorkflow w WHERE LOWER(w.updatedStatus) LIKE %:updatedStatus%")
+    Page<ApprovalWorkflow> findByUpdatedStatusContaining(
+            @Param("updatedStatus") String updatedStatus,
+            Pageable pageable);
 }

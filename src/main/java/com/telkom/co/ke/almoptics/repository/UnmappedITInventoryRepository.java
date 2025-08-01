@@ -75,4 +75,10 @@ public interface UnmappedITInventoryRepository
     @Modifying
     @Query("DELETE FROM UnmappedITInventory u WHERE u.hostName = :hostName")
     void deleteByHostName(@Param("hostName") String hostName);
+
+    @Query("SELECT u FROM UnmappedITInventory u WHERE u.hardwareSerialNumber = :hardwareSerialNumber OR u.elementId = :elementId")
+    Optional<UnmappedITInventory> findByHardwareSerialNumberOrElementId(
+            @Param("hardwareSerialNumber") String hardwareSerialNumber,
+            @Param("elementId") String elementId);
+
 }

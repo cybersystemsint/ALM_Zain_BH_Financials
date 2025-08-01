@@ -116,7 +116,8 @@ public class tb_FinancialReport implements Serializable {
     @JsonProperty("depreciationCode")
     private String depreciationCode;
 
-    @Column(name = "`UsefulLife(Months)`")
+//    @Column(name = "`UsefulLife(Months)`")
+    @Column(name = "`UsefulLife_Months`")
     @JsonProperty("usefulLifeMonths")
     private Integer usefulLifeMonths;
 
@@ -194,9 +195,12 @@ public class tb_FinancialReport implements Serializable {
     @JsonProperty("nepAssetID")
     private String nepAssetId;
 
+//    @Column(name = "Deleted")
+//    @JsonProperty("deleted")
+//    private Boolean deleted;
     @Column(name = "Deleted")
     @JsonProperty("deleted")
-    private Boolean deleted;
+    private String deleted;
 
     @Column(name = "Adjustment", precision = 15, scale = 3)
     @JsonProperty("adjustment")
@@ -611,11 +615,18 @@ public class tb_FinancialReport implements Serializable {
         this.nepAssetId = nepAssetId;
     }
 
-    public Boolean getDeleted() {
+//    public Boolean getDeleted() {
+//        return deleted;
+//    }
+//
+//    public void setDeleted(Boolean deleted) {
+//        this.deleted = deleted;
+//    }
+    public String getDeleted() { // Changed return type to String
         return deleted;
     }
 
-    public void setDeleted(Boolean deleted) {
+    public void setDeleted(String deleted) { // Changed parameter type to String
         this.deleted = deleted;
     }
 

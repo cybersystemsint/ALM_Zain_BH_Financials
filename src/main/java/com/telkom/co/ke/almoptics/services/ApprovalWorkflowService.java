@@ -11,6 +11,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -27,6 +28,14 @@ import java.time.ZoneOffset;
 import java.util.*;
 import java.util.stream.Collectors;
 import java.security.SecureRandom;
+import org.springframework.data.jpa.domain.Specification;
+import javax.persistence.criteria.Predicate;
+import javax.persistence.criteria.Root;
+import javax.persistence.criteria.Subquery;
+import java.util.ArrayList;
+import java.util.List;
+
+
 
 @Service
 public class ApprovalWorkflowService {
@@ -45,8 +54,8 @@ public class ApprovalWorkflowService {
     @Autowired
     private AuditLogRepository auditLogRepository;
 
-    @Autowired
-    private NotificationService notificationService;
+//    @Autowired
+//    private NotificationService notificationService;
 
     @Autowired
     private ObjectMapper objectMapper;
@@ -63,14 +72,14 @@ public class ApprovalWorkflowService {
     @PersistenceContext
     private EntityManager entityManager;
 
-    @Transactional(readOnly = true)
-    public List<tb_ApprovalWorkflow> getPendingApprovals() {
-        return findByStatus("Pending L1 Approval");
-    }
+//    @Transactional(readOnly = true)
+//    public List<tb_ApprovalWorkflow> getPendingApprovals() {
+//        return findByStatus("Pending L1 Approval");
+//    }
 
     @Transactional
-    public tb_ApprovalWorkflow createApprovalWorkflow(tb_FinancialReport financialReport, String nodeType, String originalStatus) {
-        logger.info("Creating approval workflow for financial report ID: {}", financialReport.getId());
+    public tb_ApprovalWorkflow createApprovalWorkflow(tb_FinancialReport financialReport, String nodeType, String originalStatus, String username) {
+        logger.info("Creating approval workflow for financial report ID: {} by user: {}", financialReport.getId(), username);
 
         String assetId = financialReport.getAssetName() != null && !financialReport.getAssetName().trim().isEmpty() ?
                 financialReport.getAssetName() : financialReport.getAssetSerialNumber();
@@ -97,7 +106,7 @@ public class ApprovalWorkflowService {
         workflow.setUpdatedStatus("Pending L1 Approval");
         workflow.setProcessId(generateUniqueProcessId());
         workflow.setComments("Financial report " + workflowStatus.toLowerCase() + " pending L1 approval");
-        workflow.setInsertedBy(financialReport.getInsertedBy() != null ? financialReport.getInsertedBy() : "system");
+        workflow.setInsertedBy(username); // Use provided username
         workflow.setInsertDate(LocalDateTime.now());
 
         ApprovalWorkflow savedWorkflow = approvalWorkflowRepository.save(workflow);
@@ -109,7 +118,7 @@ public class ApprovalWorkflowService {
                 nodeType,
                 workflowStatus,
                 "Pending L1 Approval",
-                "Approval workflow created for " + workflowStatus.toLowerCase()
+                "Approval workflow created for " + workflowStatus.toLowerCase() + " by " + username
         );
 
         sendApprovalNotification(dto, "REQUEST", financialReport.getAssetSerialNumber(), nodeType);
@@ -117,8 +126,8 @@ public class ApprovalWorkflowService {
     }
 
     @Transactional
-    public tb_ApprovalWorkflow createDeletionWorkflow(tb_FinancialReport financialReport, String nodeType, String originalStatus) {
-        logger.info("Creating deletion workflow for financial report ID: {}", financialReport.getId());
+    public tb_ApprovalWorkflow createDeletionWorkflow(tb_FinancialReport financialReport, String nodeType, String originalStatus, String username) {
+        logger.info("Creating deletion workflow for financial report ID: {} by user: {}", financialReport.getId(), username);
 
         String assetId = financialReport.getAssetName() != null && !financialReport.getAssetName().trim().isEmpty() ?
                 financialReport.getAssetName() : financialReport.getAssetSerialNumber();
@@ -146,11 +155,12 @@ public class ApprovalWorkflowService {
         workflow.setUpdatedStatus("Pending L1 Approval");
         workflow.setProcessId(generateUniqueProcessId());
         workflow.setComments("Financial report marked for deletion - pending L1 approval");
-        workflow.setInsertedBy(financialReport.getChangedBy() != null ? financialReport.getChangedBy() : "system");
+        workflow.setInsertedBy(username); // Use provided username
         workflow.setInsertDate(LocalDateTime.now());
 
         financialReport.setStatusFlag("DECOMMISSIONED");
         financialReport.setFinancialApprovalStatus("Pending");
+        financialReport.setChangedBy(username); // Set ChangedBy to username
         financialReportRepo.save(financialReport);
 
         ApprovalWorkflow savedWorkflow = approvalWorkflowRepository.save(workflow);
@@ -162,7 +172,7 @@ public class ApprovalWorkflowService {
                 nodeType,
                 "pending deletion",
                 "Pending L1 Approval",
-                "Deletion workflow created for financial report"
+                "Deletion workflow created for financial report by " + username
         );
 
         sendApprovalNotification(dto, "DELETE_REQUEST", financialReport.getAssetSerialNumber(), nodeType);
@@ -257,7 +267,7 @@ public class ApprovalWorkflowService {
                 nextStatus = "Pending L3 Approval";
                 break;
             case "Pending L3 Approval":
-                nextStatus = "APPROVED";
+                nextStatus = "Approved";
                 break;
             default:
                 logger.warn("Invalid status for approval: {}", currentStatus);
@@ -278,7 +288,7 @@ public class ApprovalWorkflowService {
 
         String newStatusFlag = determineStatusFlag(financialReport, previousStatusFlag, nextStatus, originalStatus);
 
-        if ("APPROVED".equals(nextStatus)) {
+        if ("Approved".equals(nextStatus)) {
             if ("pending deletion".equals(originalStatus)) {
                 logger.info("Deleting financial report ID {} for {}", financialReport.getId(), originalStatus);
                 financialReportRepo.delete(financialReport);
@@ -313,7 +323,7 @@ public class ApprovalWorkflowService {
                 logger.info("Applying L3 approval for financial report ID {}. Current values: initialCost={}, assetSerialNumber={}",
                         financialReport.getId(), financialReport.getInitialCost(), financialReport.getAssetSerialNumber());
 
-                financialReport.setStatusFlag(newStatusFlag);
+//                financialReport.setStatusFlag(newStatusFlag);
                 financialReport.setFinancialApprovalStatus("Approved");
                 financialReport.setOriginalState(null);
                 financialReport.setChangeDate(java.sql.Timestamp.valueOf(LocalDateTime.now()));
@@ -352,7 +362,12 @@ public class ApprovalWorkflowService {
                 logger.warn("Invalid original status for approval: {}", originalStatus);
                 return false;
             }
-            approvalWorkflowRepository.delete(workflow);
+            workflow.setUpdatedStatus("Approved");
+            workflow.setChangedBy(approvedBy);
+            workflow.setChangeDate(LocalDateTime.now());
+            approvalWorkflowRepository.save(workflow);
+            logger.info("Workflow ID {} marked as APPROVED and retained in tb_WF_Financial_Approval_Request", workflowId);
+//            approvalWorkflowRepository.delete(workflow);
         } else {
             workflow.setUpdatedStatus(nextStatus);
             workflow.setChangedBy(approvedBy);
@@ -470,7 +485,7 @@ public class ApprovalWorkflowService {
                 financialReport.setOldFarCategory((String) originalState.get("oldFarCategory"));
                 financialReport.setCostCenterData((String) originalState.get("costCenterData"));
                 financialReport.setNepAssetId((String) originalState.get("nepAssetId"));
-                financialReport.setDeleted((Boolean) originalState.get("deleted"));
+                financialReport.setDeleted((String) originalState.get("deleted"));
                 financialReport.setAdjustment(originalState.get("adjustment") != null ? new BigDecimal(originalState.get("adjustment").toString()) : null);
                 financialReport.setWriteOffDate(originalState.get("writeOffDate") != null ? new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").parse((String) originalState.get("writeOffDate")) : null);
                 financialReport.setTag((String) originalState.get("tag"));
@@ -612,7 +627,7 @@ public class ApprovalWorkflowService {
                 financialReport.setOldFarCategory((String) originalState.get("oldFarCategory"));
                 financialReport.setCostCenterData((String) originalState.get("costCenterData"));
                 financialReport.setNepAssetId((String) originalState.get("nepAssetId"));
-                financialReport.setDeleted((Boolean) originalState.get("deleted"));
+                financialReport.setDeleted((String) originalState.get("deleted"));
                 financialReport.setAdjustment(originalState.get("adjustment") != null ? new BigDecimal(originalState.get("adjustment").toString()) : null);
                 financialReport.setWriteOffDate(originalState.get("writeOffDate") != null ? new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").parse((String) originalState.get("writeOffDate")) : null);
                 financialReport.setTag((String) originalState.get("tag"));
@@ -721,11 +736,19 @@ public class ApprovalWorkflowService {
         }
     }
 
+//    @Transactional(readOnly = true)
+//    public List<tb_ApprovalWorkflow> findByStatus(String status) {
+//        List<ApprovalWorkflow> entities = approvalWorkflowRepository.findByUpdatedStatus(status);
+//        return entities.stream().map(this::convertToDto).collect(Collectors.toList());
+//    }
     @Transactional(readOnly = true)
-    public List<tb_ApprovalWorkflow> findByStatus(String status) {
-        List<ApprovalWorkflow> entities = approvalWorkflowRepository.findByUpdatedStatus(status);
-        return entities.stream().map(this::convertToDto).collect(Collectors.toList());
+    public Page<tb_ApprovalWorkflow> findByUpdatedStatusContaining(
+            String updatedStatus, Pageable pageable) {
+        Page<ApprovalWorkflow> entityPage = approvalWorkflowRepository
+                .findByUpdatedStatusContaining(updatedStatus.toLowerCase(), pageable);
+        return entityPage.map(this::convertToDto);
     }
+
 
     @Transactional(readOnly = true)
     public List<tb_ApprovalWorkflow> findByAssetId(String assetId) {
@@ -767,7 +790,7 @@ public class ApprovalWorkflowService {
                 : LocalDateTime.now();
         long daysSinceInsert = Duration.between(insertDate, LocalDateTime.now()).toDays();
 
-        if ("NEW".equals(currentStatusFlag) && daysSinceInsert < 30 && !"APPROVED".equals(nextWorkflowStatus)) {
+        if ("NEW".equals(currentStatusFlag) && daysSinceInsert < 30 && !"Approved".equals(nextWorkflowStatus)) {
             return "NEW";
         } else {
             return "EXISTING";
@@ -850,6 +873,93 @@ public class ApprovalWorkflowService {
         auditLog.setNodeType(nodeType);
         auditLog.setNotes(notes);
         auditLogRepository.save(auditLog);
+    }
+
+    // Modified ApprovalWorkflowService.findByFilters (added objectStatus param and subquery)
+    @Transactional(readOnly = true)
+    public Page<tb_ApprovalWorkflow> findByFilters(
+            String team, String objectType, String assetId, String originalStatus,
+            String updatedStatus, String processId, String startDate, String endDate,
+            String objectStatus, Pageable pageable) {
+
+        Specification<ApprovalWorkflow> spec = (root, query, cb) -> {
+            List<Predicate> predicates = new ArrayList<>();
+
+            if (team != null && !team.trim().isEmpty()) {
+                String expectedStatus = switch (team) {
+                    case "Financial L1" -> "Pending L1 Approval";
+                    case "Financial L2" -> "Pending L2 Approval";
+                    case "Financial L3" -> "Pending L3 Approval";
+                    default -> null;
+                };
+                if (expectedStatus != null) {
+                    predicates.add(cb.equal(cb.lower(root.get("updatedStatus")), expectedStatus.toLowerCase()));
+                }
+            }
+
+            if (objectType != null && !objectType.trim().isEmpty()) {
+                predicates.add(cb.equal(cb.lower(root.get("objectType")), objectType.toLowerCase()));
+            }
+            if (assetId != null && !assetId.trim().isEmpty()) {
+                predicates.add(cb.equal(cb.lower(root.get("assetId")), assetId.toLowerCase()));
+            }
+            if (originalStatus != null && !originalStatus.trim().isEmpty()) {
+                predicates.add(cb.equal(cb.lower(root.get("originalStatus")), originalStatus.toLowerCase()));
+            }
+            if (updatedStatus != null && !updatedStatus.trim().isEmpty()) {
+                predicates.add(cb.equal(cb.lower(root.get("updatedStatus")), updatedStatus.toLowerCase()));
+            }
+            if (processId != null && !processId.trim().isEmpty()) {
+                try {
+                    int pid = Integer.parseInt(processId);
+                    predicates.add(cb.equal(root.get("processId"), pid));
+                } catch (NumberFormatException e) {
+                    predicates.add(cb.isFalse(cb.literal(true)));
+                }
+            }
+            if (startDate != null && !startDate.trim().isEmpty()) {
+                LocalDateTime start = LocalDateTime.parse(startDate + "T00:00:00");
+                predicates.add(cb.greaterThanOrEqualTo(root.get("insertDate"), start));
+            }
+            if (endDate != null && !endDate.trim().isEmpty()) {
+                LocalDateTime end = LocalDateTime.parse(endDate + "T23:59:59");
+                predicates.add(cb.lessThanOrEqualTo(root.get("insertDate"), end));
+            }
+            if (objectStatus != null && !objectStatus.trim().isEmpty()) {
+                Subquery<tb_FinancialReport> subquery = query.subquery(tb_FinancialReport.class);
+                Root<tb_FinancialReport> reportRoot = subquery.from(tb_FinancialReport.class);
+                subquery.select(reportRoot);
+                Predicate assetMatch = cb.or(
+                        cb.equal(reportRoot.get("assetName"), root.get("assetId")),
+                        cb.equal(reportRoot.get("assetSerialNumber"), root.get("assetId"))
+                );
+                subquery.where(assetMatch, cb.equal(cb.lower(reportRoot.get("statusFlag")), objectStatus.toLowerCase()));
+                predicates.add(cb.exists(subquery));
+            }
+
+            return cb.and(predicates.toArray(new Predicate[0]));
+        };
+
+        Page<ApprovalWorkflow> entityPage = approvalWorkflowRepository.findAll(spec, pageable);
+        return entityPage.map(this::convertToDto);
+    }
+
+    @Transactional(readOnly = true)
+    public Page<tb_ApprovalWorkflow> searchByAssetIdOrSerialNumber(String query, Pageable pageable) {
+        List<tb_FinancialReport> reports = financialReportRepo.findAllByAssetNameContainingIgnoreCaseOrAssetSerialNumberContainingIgnoreCase(query);
+        List<tb_ApprovalWorkflow> workflows = new ArrayList<>();
+        for (tb_FinancialReport report : reports) {
+            List<tb_ApprovalWorkflow> byAssetId = findByAssetId(report.getAssetName() != null ? report.getAssetName() : report.getAssetSerialNumber());
+            workflows.addAll(byAssetId);
+        }
+
+        // Sort and paginate
+        workflows.sort(Comparator.comparing(tb_ApprovalWorkflow::getINSERTDATE, Comparator.nullsLast(Comparator.reverseOrder())));
+        int start = (int) pageable.getOffset();
+        int end = Math.min((start + pageable.getPageSize()), workflows.size());
+        List<tb_ApprovalWorkflow> pagedWorkflows = workflows.subList(start, end);
+
+        return new PageImpl<>(pagedWorkflows, pageable, workflows.size());
     }
 
     private void sendApprovalNotification(tb_ApprovalWorkflow workflow, String notificationType,

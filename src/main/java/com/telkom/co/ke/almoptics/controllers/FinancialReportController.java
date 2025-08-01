@@ -8,6 +8,7 @@ import com.telkom.co.ke.almoptics.models.ApprovalWorkflow;
 import com.telkom.co.ke.almoptics.repository.*;
 import com.telkom.co.ke.almoptics.services.FinancialReportService;
 import com.telkom.co.ke.almoptics.services.ApprovalWorkflowService;
+import com.telkom.co.ke.almoptics.services.InventorySyncService;
 import com.telkom.co.ke.almoptics.services.WriteOffReportService;
 import org.apache.commons.csv.CSVParser;
 import org.apache.commons.csv.CSVRecord;
@@ -24,6 +25,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.io.StringWriter;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.time.*;
@@ -46,7 +48,10 @@ import javax.persistence.EntityManager;
 import javax.persistence.PersistenceContext;
 import javax.persistence.criteria.Predicate;
 import java.util.ArrayList;
-
+import org.apache.poi.ss.usermodel.Row;
+import org.apache.poi.ss.usermodel.Sheet;
+import org.apache.poi.xssf.streaming.SXSSFWorkbook;
+import java.io.ByteArrayOutputStream;
 
 @RestController
 @RequestMapping("/api/financial")
@@ -76,6 +81,9 @@ public class FinancialReportController {
     private UnmappedITInventoryRepository unmappedITInventoryRepository;
 
     @Autowired
+    private UnmappedLicenseRepository unmappedLicenseRepository;
+
+    @Autowired
     private ApprovalWorkflowRepository approvalWorkflowRepository;
 
     @Autowired
@@ -83,6 +91,9 @@ public class FinancialReportController {
 
     @Autowired
     private ObjectMapper objectMapper;
+
+    @Autowired
+    private InventorySyncService inventorySyncService;
 
     @PersistenceContext
     private EntityManager entityManager;
@@ -114,12 +125,28 @@ public class FinancialReportController {
             response.put("size", reportPage.getSize());
             response.put("sort", sortBy + "," + sortDir);
 
-            BigDecimal totalCost = financialReportService.getTotalCost();
-            BigDecimal totalNBV = financialReportService.getTotalNBV();
-            BigDecimal totalDepreciation = financialReportService.getTotalDepreciation();
-            BigDecimal filteredCost = financialReportService.getFilteredCost(search, lastMonthDate);
-            BigDecimal filteredNBV = financialReportService.getFilteredNBV(search, lastMonthDate);
-            BigDecimal filteredDepreciation = financialReportService.getFilteredDepreciation(search, lastMonthDate);
+            // Calculate filtered values based on the paginated subset
+            List<tb_FinancialReport> reports = reportPage.getContent();
+            BigDecimal filteredCost = reports.stream()
+                    .map(tb_FinancialReport::getInitialCost)
+                    .filter(Objects::nonNull)
+                    .reduce(BigDecimal.ZERO, BigDecimal::add)
+                    .setScale(3, RoundingMode.HALF_UP);
+            BigDecimal filteredDepreciation = reports.stream()
+                    .map(tb_FinancialReport::getAccumulatedDepreciation)
+                    .filter(Objects::nonNull)
+                    .reduce(BigDecimal.ZERO, BigDecimal::add)
+                    .setScale(3, RoundingMode.HALF_UP);
+            BigDecimal filteredNBV = filteredCost.subtract(filteredDepreciation)
+                    .setScale(3, RoundingMode.HALF_UP);
+
+            // Use database aggregates for total values
+            BigDecimal totalCost = financialReportService.getTotalCost() != null ?
+                    financialReportService.getTotalCost().setScale(3, RoundingMode.HALF_UP) : BigDecimal.ZERO.setScale(3, RoundingMode.HALF_UP);
+            BigDecimal totalNBV = financialReportService.getTotalNBV() != null ?
+                    financialReportService.getTotalNBV().setScale(3, RoundingMode.HALF_UP) : BigDecimal.ZERO.setScale(3, RoundingMode.HALF_UP);
+            BigDecimal totalDepreciation = financialReportService.getTotalDepreciation() != null ?
+                    financialReportService.getTotalDepreciation().setScale(3, RoundingMode.HALF_UP) : BigDecimal.ZERO.setScale(3, RoundingMode.HALF_UP);
 
             response.put("totalCost", totalCost);
             response.put("totalNBV", totalNBV);
@@ -141,33 +168,6 @@ public class FinancialReportController {
         return YearMonth.from(inputDate).minusMonths(1).atEndOfMonth().toString();
     }
 
-    @GetMapping("/reports/serial/{serialNumber}")
-    public ResponseEntity<tb_FinancialReport> getReportBySerialNumber(@PathVariable String serialNumber) {
-        try {
-            Optional<tb_FinancialReport> report = financialReportService.findBySerialNumber(serialNumber);
-            return report.map(r -> new ResponseEntity<>(r, HttpStatus.OK))
-                    .orElseGet(() -> new ResponseEntity<>(HttpStatus.NOT_FOUND));
-        } catch (Exception e) {
-            logger.error("Error retrieving report by serial number: " + serialNumber, e);
-            return new ResponseEntity<>(null, HttpStatus.INTERNAL_SERVER_ERROR);
-        }
-    }
-
-    @GetMapping("/reports/asset/{assetName}")
-    public ResponseEntity<?> getReportsByAssetName(@PathVariable String assetName) {
-        try {
-            Optional<tb_FinancialReport> reportOpt = financialReportService.findByAssetName(assetName);
-            if (!reportOpt.isPresent()) {
-                return ResponseEntity.status(HttpStatus.NOT_FOUND).body("No reports found for asset: " + assetName);
-            }
-            return ResponseEntity.ok(reportOpt.get());
-        } catch (Exception e) {
-            logger.error("Error retrieving reports by asset name: " + assetName, e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("An error occurred while fetching the reports.");
-        }
-    }
-
-
     @DeleteMapping("/reports/{serialNumber}")
     public ResponseEntity<Map<String, Object>> deleteReport(
             @PathVariable String serialNumber,
@@ -186,7 +186,8 @@ public class FinancialReportController {
             existingReport.setChangedBy(username);
             existingReport.setChangeDate(new Date());
 
-            tb_ApprovalWorkflow workflow = approvalWorkflowService.createDeletionWorkflow(existingReport, existingReport.getNodeType(), "pending deletion");
+//            tb_ApprovalWorkflow workflow = approvalWorkflowService.createDeletionWorkflow(existingReport, existingReport.getNodeType(), "pending deletion");
+            tb_ApprovalWorkflow workflow = approvalWorkflowService.createDeletionWorkflow(existingReport, existingReport.getNodeType(), "pending deletion", username);
             financialReportService.save(existingReport);
 
             response.put("message", "Financial report deletion submitted for approval");
@@ -241,39 +242,71 @@ public class FinancialReportController {
                     return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
                 }
 
-                String[] mandatoryFields = {
-                        "NodeType", report.getNodeType(),
-                        "AssetName", report.getAssetName(),
-                        "AssetType", report.getAssetType(),
-                        "InstallationDate", String.valueOf(report.getInstallationDate()),
-                        "InitialCost", String.valueOf(report.getInitialCost()),
-                        "SalvageValue", String.valueOf(report.getSalvageValue()),
-                        "PONumber", report.getPoNumber(),
-                        "PODate", String.valueOf(report.getPoDate()),
-                        "FA_CATEGORY", report.getAssetCategory(),
-                        "L1", report.getL1(),
-                        "L2", report.getL2(),
-                        "L3", report.getL3(),
-                        "L4", report.getL4(),
-                        "AccumulatedDepreciationCode", report.getAccumulatedDepreciationCode(),
-                        "DepreciationCode", report.getDepreciationCode(),
-                        "UsefulLife(Months)", String.valueOf(report.getUsefulLifeMonths()),
-                        "VENDOR_NAME", report.getVendorName(),
-                        "VENDOR_NUMBER", report.getVendorNumber(),
-                        "PROJECT_NUMBER", report.getProjectNumber(),
-                        "DateOfService", String.valueOf(report.getDateOfService()),
-                        "PoLineNumber", report.getPoLineNumber(),
-                        "CostCenterData", report.getCostCenterData()
-                };
+                // Validate mandatory fields based on their types
+                Map<String, Object> mandatoryFields = new HashMap<>();
+                mandatoryFields.put("NodeType", report.getNodeType());
+                mandatoryFields.put("AssetName", report.getAssetName());
+                mandatoryFields.put("AssetType", report.getAssetType());
+                mandatoryFields.put("InstallationDate", report.getInstallationDate());
+                mandatoryFields.put("InitialCost", report.getInitialCost());
+                mandatoryFields.put("SalvageValue", report.getSalvageValue());
+                mandatoryFields.put("PONumber", report.getPoNumber());
+                mandatoryFields.put("PODate", report.getPoDate());
+                mandatoryFields.put("L1", report.getL1());
+                mandatoryFields.put("L2", report.getL2());
+                mandatoryFields.put("L3", report.getL3());
+                mandatoryFields.put("L4", report.getL4());
+                mandatoryFields.put("AccumulatedDepreciationCode", report.getAccumulatedDepreciationCode());
+                mandatoryFields.put("DepreciationCode", report.getDepreciationCode());
+                mandatoryFields.put("UsefulLifeMonths", report.getUsefulLifeMonths());
+                mandatoryFields.put("VendorName", report.getVendorName());
+                mandatoryFields.put("VendorNumber", report.getVendorNumber());
+                mandatoryFields.put("ProjectNumber", report.getProjectNumber());
+                mandatoryFields.put("DateOfService", report.getDateOfService());
+                mandatoryFields.put("PoLineNumber", report.getPoLineNumber());
 
-                for (int j = 0; j < mandatoryFields.length; j += 2) {
-                    String fieldName = mandatoryFields[j];
-                    String fieldValue = mandatoryFields[j + 1];
-                    if (fieldValue == null || fieldValue.trim().isEmpty() || fieldValue.equals("null")) {
+                for (Map.Entry<String, Object> entry : mandatoryFields.entrySet()) {
+                    String fieldName = entry.getKey();
+                    Object fieldValue = entry.getValue();
+
+                    // String field validation
+                    if (fieldValue instanceof String) {
+                        String value = (String) fieldValue;
+                        if (value == null || value.trim().isEmpty()) {
+                            response.put("message", "Record " + recordNumber + ": Missing or invalid mandatory field: " + fieldName);
+                            response.put("status", "error");
+                            return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
+                        }
+                    }
+                    // Integer field validation
+                    else if (fieldName.equals("UsefulLifeMonths") && (fieldValue == null || (Integer) fieldValue <= 0)) {
+                        response.put("message", "Record " + recordNumber + ": Missing or invalid mandatory field: " + fieldName + " (must be a positive integer)");
+                        response.put("status", "error");
+                        return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
+                    }
+                    // BigDecimal field validation
+                    else if (fieldValue instanceof BigDecimal) {
+                        BigDecimal value = (BigDecimal) fieldValue;
+                        if (value == null || value.compareTo(BigDecimal.ZERO) < 0) {
+                            response.put("message", "Record " + recordNumber + ": Missing or invalid mandatory field: " + fieldName + " (must be non-negative)");
+                            response.put("status", "error");
+                            return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
+                        }
+                    }
+                    // Handle any other unexpected null fields
+                    else if (fieldValue == null) {
                         response.put("message", "Record " + recordNumber + ": Missing or invalid mandatory field: " + fieldName);
                         response.put("status", "error");
                         return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
                     }
+                }
+
+                // Populate fields from inventory (optional, does not fail upload)
+                try {
+                    report = inventorySyncService.populateFieldsFromInventory(report);
+                } catch (Exception e) {
+                    logger.warn("Failed to sync inventory for identifier {}: {}", identifier, e.getMessage());
+                    warnings.add("Record " + recordNumber + ": Failed to sync inventory data for identifier " + identifier + ": " + e.getMessage());
                 }
             }
 
@@ -318,6 +351,28 @@ public class FinancialReportController {
                     continue;
                 }
 
+                // For existing records, check if assetName exists in NELicense
+                if (existingReportOpt.isPresent()) {
+                    tb_FinancialReport existingReport = existingReportOpt.get();
+                    try {
+                        boolean inLicense = unmappedLicenseRepository.findByElementID(existingReport.getAssetName()).isPresent();
+                        if (!inLicense) {
+                            logger.info("Skipping record {} for identifier {}: assetName {} not found in NELicense",
+                                    recordsProcessed, identifier, existingReport.getAssetName());
+                            warnings.add("Record " + recordsProcessed + ": AssetName " + existingReport.getAssetName() +
+                                    " not found in NELicense. Record cannot be modified.");
+                            recordsSkipped++;
+                            continue;
+                        }
+                    } catch (Exception e) {
+                        logger.error("Error querying NELicense for assetName: {}", existingReport.getAssetName(), e);
+                        warnings.add("Record " + recordsProcessed + ": Unable to check NELicense for assetName " +
+                                existingReport.getAssetName() + " due to server error");
+                        recordsSkipped++;
+                        continue;
+                    }
+                }
+
                 // Check unmapped inventory only for new records
                 boolean inUnmapped = true;
                 if (!existingReportOpt.isPresent()) {
@@ -329,7 +384,8 @@ public class FinancialReportController {
                                 unmappedITInventoryRepository.findByHostSerialNumber(identifier).isPresent() ||
                                 unmappedITInventoryRepository.findByHardwareSerialNumber(identifier).isPresent() ||
                                 unmappedITInventoryRepository.findByElementId(identifier).isPresent() ||
-                                unmappedITInventoryRepository.findByHostName(identifier).isPresent();
+                                unmappedITInventoryRepository.findByHostName(identifier).isPresent() ||
+                                unmappedLicenseRepository.findByElementID(identifier).isPresent();
                     } catch (Exception e) {
                         logger.error("Error querying unmapped inventory for identifier: {}", identifier, e);
                         warnings.add("Record " + recordsProcessed + ": Unable to check unmapped inventory for identifier " + identifier + " due to server error");
@@ -370,7 +426,7 @@ public class FinancialReportController {
                         existingReport.setChangeDate(new Date());
                         try {
                             savedReport = financialReportService.save(existingReport);
-                            workflow = approvalWorkflowService.createDeletionWorkflow(savedReport, savedReport.getNodeType(), "pending deletion");
+                            workflow = approvalWorkflowService.createDeletionWorkflow(savedReport, savedReport.getNodeType(), "pending deletion", username);
                         } catch (Exception e) {
                             logger.error("Error processing deletion for identifier: {}", identifier, e);
                             warnings.add("Record " + recordsProcessed + ": Failed to process deletion for identifier " + identifier);
@@ -491,8 +547,8 @@ public class FinancialReportController {
                         existingReport.setChangeDate(new Date());
 
                         try {
-                            savedReport = financialReportRepo.save(existingReport);
-                            workflow = approvalWorkflowService.createApprovalWorkflow(savedReport, savedReport.getNodeType(), "pending modification");
+                            savedReport = financialReportService.save(existingReport);
+                            workflow = approvalWorkflowService.createApprovalWorkflow(savedReport, savedReport.getNodeType(), "pending modification", username);
                         } catch (Exception e) {
                             logger.error("Error processing modification for identifier: {}", identifier, e);
                             warnings.add("Record " + recordsProcessed + ": Failed to process modification for identifier " + identifier);
@@ -509,7 +565,7 @@ public class FinancialReportController {
                     report.setFinancialApprovalStatus("Pending L1 Approval");
                     try {
                         savedReport = financialReportService.save(report);
-                        workflow = approvalWorkflowService.createApprovalWorkflow(savedReport, savedReport.getNodeType(), "pending addition");
+                        workflow = approvalWorkflowService.createApprovalWorkflow(savedReport, savedReport.getNodeType(), "pending addition", username);
                     } catch (Exception e) {
                         logger.error("Error processing new record for identifier: {}", identifier, e);
                         warnings.add("Record " + recordsProcessed + ": Failed to process new record for identifier " + identifier);
@@ -553,10 +609,6 @@ public class FinancialReportController {
             return new ResponseEntity<>(response, HttpStatus.INTERNAL_SERVER_ERROR);
         }
     }
-
-
-
-
 
     // Helper method to compare fields between existing and incoming reports
     private boolean hasChanges(tb_FinancialReport existing, tb_FinancialReport incoming) {
@@ -1138,13 +1190,22 @@ public class FinancialReportController {
         tb_FinancialReport savedReport = financialReportRepo.save(existingReport);
 
         // Create appropriate workflow
+//        tb_ApprovalWorkflow workflow;
+//        if (savedReport.getInitialCost() == null || savedReport.getInitialCost().compareTo(BigDecimal.ZERO) == 0) {
+//            workflow = approvalWorkflowService.createDeletionWorkflow(savedReport, savedReport.getNodeType(), "pending deletion");
+//        } else {
+//            workflow = approvalWorkflowService.createApprovalWorkflow(savedReport, savedReport.getNodeType(), "pending modification");
+//        }
+        String username = updatedReport.getChangedBy() != null ? updatedReport.getChangedBy() : "system";
+        existingReport.setFinancialApprovalStatus("Pending L1 Approval");
+        existingReport.setChangedBy(username);
+        existingReport.setChangeDate(new Date());
         tb_ApprovalWorkflow workflow;
         if (savedReport.getInitialCost() == null || savedReport.getInitialCost().compareTo(BigDecimal.ZERO) == 0) {
-            workflow = approvalWorkflowService.createDeletionWorkflow(savedReport, savedReport.getNodeType(), "pending deletion");
+            workflow = approvalWorkflowService.createDeletionWorkflow(savedReport, savedReport.getNodeType(), "pending deletion", username);
         } else {
-            workflow = approvalWorkflowService.createApprovalWorkflow(savedReport, savedReport.getNodeType(), "pending modification");
+            workflow = approvalWorkflowService.createApprovalWorkflow(savedReport, savedReport.getNodeType(), "pending modification", username);
         }
-
         logger.info("Financial report {} modified and submitted for approval with workflow ID: {}", savedReport.getId(), workflow.getID());
         response.put("message", "Financial report modification submitted for approval");
         response.put("report", savedReport);
@@ -1414,5 +1475,268 @@ public class FinancialReportController {
         clone.setRfid(original.getRfid());
         clone.setInvoiceNumber(original.getInvoiceNumber());
         return clone;
+    }
+
+    @GetMapping("/monthly-report")
+    public ResponseEntity<Map<String, Object>> getMonthlyFinancialReport(
+            @RequestParam String date, // e.g., "24 Jul 2025"
+            @RequestParam(defaultValue = "") String search,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "100") int size) {
+        try {
+            Sort sort = Sort.by("id").ascending();
+            Pageable pageable = PageRequest.of(page, size, sort);
+
+            Map<String, Object> calculations = financialReportService.calculateDepreciationForMonth(date, search, pageable);
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("filteredCost", calculations.get("filteredCost").toString());
+            response.put("filteredDepreciation", calculations.get("filteredDepreciation").toString());
+            response.put("filteredNBV", calculations.get("filteredNBV").toString());
+            response.put("totalCost", calculations.get("totalCost").toString());
+            response.put("totalDepreciation", calculations.get("totalDepreciation").toString());
+            response.put("totalNBV", calculations.get("totalNBV").toString());
+            response.put("currentPage", calculations.get("currentPage"));
+            response.put("totalPages", calculations.get("totalPages"));
+            response.put("totalItems", calculations.get("totalItems"));
+            response.put("first", calculations.get("first"));
+            response.put("last", calculations.get("last"));
+            response.put("size", calculations.get("size"));
+            response.put("sort", calculations.get("sort"));
+            response.put("records", calculations.get("records"));
+
+            logger.info("Monthly financial report generated for {} at {}", date, new SimpleDateFormat("hh:mm a zzz").format(new Date()));
+            return new ResponseEntity<>(response, HttpStatus.OK);
+        } catch (Exception e) {
+            logger.error("Error generating monthly financial report", e);
+            return new ResponseEntity<>(Collections.singletonMap("message", "Error: " + e.getMessage()), HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+    @PostMapping("/export")
+    public ResponseEntity<byte[]> exportFinancialReports(@RequestBody Map<String, Object> body) {
+        try {
+            String format = (String) body.get("format");
+            if (format == null || (!"CSV".equalsIgnoreCase(format) && !"EXCEL".equalsIgnoreCase(format))) {
+                return ResponseEntity.badRequest().body(null);
+            }
+            Map<String, String> filters = (Map<String, String>) body.getOrDefault("filters", new HashMap<>());
+
+            // Build Specification from filters (same as /filter)
+            Specification<tb_FinancialReport> spec = (root, query, cb) -> {
+                List<Predicate> predicates = new ArrayList<>();
+                SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+
+                // Existing filters
+                if (filters.containsKey("l1") && !filters.get("l1").isEmpty()) {
+                    predicates.add(cb.equal(root.get("l1"), filters.get("l1")));
+                }
+                if (filters.containsKey("l2") && !filters.get("l2").isEmpty()) {
+                    predicates.add(cb.equal(root.get("l2"), filters.get("l2")));
+                }
+                if (filters.containsKey("l3") && !filters.get("l3").isEmpty()) {
+                    predicates.add(cb.equal(root.get("l3"), filters.get("l3")));
+                }
+                if (filters.containsKey("l4") && !filters.get("l4").isEmpty()) {
+                    predicates.add(cb.equal(root.get("l4"), filters.get("l4")));
+                }
+                if (filters.containsKey("itemBarCode") && !filters.get("itemBarCode").isEmpty()) {
+                    predicates.add(cb.equal(root.get("itemBarCode"), filters.get("itemBarCode")));
+                }
+                if (filters.containsKey("invoiceNumber") && !filters.get("invoiceNumber").isEmpty()) {
+                    predicates.add(cb.equal(root.get("invoiceNumber"), filters.get("invoiceNumber")));
+                }
+                if (filters.containsKey("assetSerialNumber") && !filters.get("assetSerialNumber").isEmpty()) {
+                    predicates.add(cb.equal(root.get("assetSerialNumber"), filters.get("assetSerialNumber")));
+                }
+                if (filters.containsKey("assetName") && !filters.get("assetName").isEmpty()) {
+                    predicates.add(cb.equal(root.get("assetName"), filters.get("assetName")));
+                }
+                if (filters.containsKey("poNumber") && !filters.get("poNumber").isEmpty()) {
+                    predicates.add(cb.equal(root.get("poNumber"), filters.get("poNumber")));
+                }
+
+                // Date range filters
+                try {
+                    if (filters.containsKey("insertDateStart") && !filters.get("insertDateStart").isEmpty()) {
+                        Date startDate = sdf.parse(filters.get("insertDateStart"));
+                        predicates.add(cb.greaterThanOrEqualTo(root.get("insertDate"), startDate));
+                    }
+                    if (filters.containsKey("insertDateEnd") && !filters.get("insertDateEnd").isEmpty()) {
+                        Date endDate = sdf.parse(filters.get("insertDateEnd"));
+                        predicates.add(cb.lessThanOrEqualTo(root.get("insertDate"), endDate));
+                    }
+                    if (filters.containsKey("changeDateStart") && !filters.get("changeDateStart").isEmpty()) {
+                        Date startDate = sdf.parse(filters.get("changeDateStart"));
+                        predicates.add(cb.greaterThanOrEqualTo(root.get("changeDate"), startDate));
+                    }
+                    if (filters.containsKey("changeDateEnd") && !filters.get("changeDateEnd").isEmpty()) {
+                        Date endDate = sdf.parse(filters.get("changeDateEnd"));
+                        predicates.add(cb.lessThanOrEqualTo(root.get("changeDate"), endDate));
+                    }
+                } catch (Exception e) {
+                    logger.error("Error parsing date filters", e);
+                }
+
+                return cb.and(predicates.toArray(new Predicate[0]));
+            };
+
+            List<tb_FinancialReport> reports = financialReportRepo.findAll(spec);
+
+            String filename;
+            byte[] content;
+            String contentType;
+
+            if ("CSV".equalsIgnoreCase(format)) {
+                filename = "financial_reports.csv";
+                contentType = "text/csv";
+                content = generateCsv(reports);
+            } else { // EXCEL
+                filename = "financial_reports.xlsx";
+                contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+                content = generateExcel(reports);
+            }
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.set(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"");
+            headers.set(HttpHeaders.CONTENT_TYPE, contentType);
+
+            return new ResponseEntity<>(content, headers, HttpStatus.OK);
+        } catch (Exception e) {
+            logger.error("Error exporting financial reports", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(null);
+        }
+    }
+
+    private byte[] generateCsv(List<tb_FinancialReport> reports) throws Exception {
+        StringWriter writer = new StringWriter();
+        CSVPrinter csvPrinter = new CSVPrinter(writer, CSVFormat.DEFAULT
+                .withHeader("Asset Name", "Serial Number", "TAG", "Oracle Asset ID", "Asset Type",
+                        "Node Type", "Installation Date", "Initial Cost", "Salvage Value",
+                        "PO Number", "PO Date", "FA Category", "L1", "L2", "L3", "L4",
+                        "Accumulated Depreciation Code", "Depreciation Code", "Useful Life (Months)",
+                        "Vendor Name", "Vendor Number", "Project Number", "Date Of Service",
+                        "Old FA Category", "Cost Center", "Adjustment", "Task ID",
+                        "PO Line Number", "Monthly Depreciation Amount", "Accumulated Depreciation",
+                        "Status Flag", "Net Cost"));
+
+        SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd");
+
+        for (tb_FinancialReport report : reports) {
+            csvPrinter.printRecord(
+                    report.getAssetName(),
+                    report.getAssetSerialNumber(),
+                    report.getTag(),
+                    report.getOracleAssetId(),
+                    report.getAssetType(),
+                    report.getNodeType(),
+                    report.getInstallationDate() != null ? dateFormat.format(report.getInstallationDate()) : "",
+                    report.getInitialCost(),
+                    report.getSalvageValue(),
+                    report.getPoNumber(),
+                    report.getPoDate() != null ? dateFormat.format(report.getPoDate()) : "",
+                    report.getFaCategory(),
+                    report.getL1(),
+                    report.getL2(),
+                    report.getL3(),
+                    report.getL4(),
+                    report.getAccumulatedDepreciationCode(),
+                    report.getDepreciationCode(),
+                    report.getUsefulLifeMonths(),
+                    report.getVendorName(),
+                    report.getVendorNumber(),
+                    report.getProjectNumber(),
+                    report.getDateOfService() != null ? dateFormat.format(report.getDateOfService()) : "",
+                    report.getOldFarCategory(),
+                    report.getCostCenterData(),
+                    report.getAdjustment(),
+                    report.getTaskId(),
+                    report.getPoLineNumber(),
+                    report.getMonthlyDepreciationAmount(),
+                    report.getAccumulatedDepreciation(),
+                    report.getStatusFlag(),
+                    report.getNetCost()
+            );
+        }
+
+        csvPrinter.flush();
+        return writer.toString().getBytes();
+    }
+
+    private byte[] generateExcel(List<tb_FinancialReport> reports) throws Exception {
+        try (SXSSFWorkbook workbook = new SXSSFWorkbook()) {
+            int rowNum = 0;
+            int sheetNum = 0;
+            Sheet sheet = workbook.createSheet("Sheet " + (++sheetNum));
+            Row headerRow = sheet.createRow(rowNum++);
+            String[] headers = {"Asset Name", "Serial Number", "TAG", "Oracle Asset ID", "Asset Type",
+                    "Node Type", "Installation Date", "Initial Cost", "Salvage Value",
+                    "PO Number", "PO Date", "FA Category", "L1", "L2", "L3", "L4",
+                    "Accumulated Depreciation Code", "Depreciation Code", "Useful Life (Months)",
+                    "Vendor Name", "Vendor Number", "Project Number", "Date Of Service",
+                    "Old FA Category", "Cost Center", "Adjustment", "Task ID",
+                    "PO Line Number", "Monthly Depreciation Amount", "Accumulated Depreciation",
+                    "Status Flag", "Net Cost"};
+            for (int i = 0; i < headers.length; i++) {
+                headerRow.createCell(i).setCellValue(headers[i]);
+            }
+
+            SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd");
+
+            for (tb_FinancialReport report : reports) {
+                if (rowNum >= 1000000) { // Excel sheet limit ~1M rows
+                    sheet = workbook.createSheet("Sheet " + (++sheetNum));
+                    rowNum = 0;
+                    headerRow = sheet.createRow(rowNum++);
+                    for (int i = 0; i < headers.length; i++) {
+                        headerRow.createCell(i).setCellValue(headers[i]);
+                    }
+                }
+
+                Row dataRow = sheet.createRow(rowNum++);
+                int cellNum = 0;
+                dataRow.createCell(cellNum++).setCellValue(report.getAssetName());
+                dataRow.createCell(cellNum++).setCellValue(report.getAssetSerialNumber());
+                dataRow.createCell(cellNum++).setCellValue(report.getTag());
+                dataRow.createCell(cellNum++).setCellValue(report.getOracleAssetId());
+                dataRow.createCell(cellNum++).setCellValue(report.getAssetType());
+                dataRow.createCell(cellNum++).setCellValue(report.getNodeType());
+                dataRow.createCell(cellNum++).setCellValue(report.getInstallationDate() != null ? dateFormat.format(report.getInstallationDate()) : "");
+                dataRow.createCell(cellNum++).setCellValue(report.getInitialCost() != null ? report.getInitialCost().doubleValue() : 0);
+                dataRow.createCell(cellNum++).setCellValue(report.getSalvageValue() != null ? report.getSalvageValue().doubleValue() : 0);
+                dataRow.createCell(cellNum++).setCellValue(report.getPoNumber());
+                dataRow.createCell(cellNum++).setCellValue(report.getPoDate() != null ? dateFormat.format(report.getPoDate()) : "");
+                dataRow.createCell(cellNum++).setCellValue(report.getFaCategory());
+                dataRow.createCell(cellNum++).setCellValue(report.getL1());
+                dataRow.createCell(cellNum++).setCellValue(report.getL2());
+                dataRow.createCell(cellNum++).setCellValue(report.getL3());
+                dataRow.createCell(cellNum++).setCellValue(report.getL4());
+                dataRow.createCell(cellNum++).setCellValue(report.getAccumulatedDepreciationCode());
+                dataRow.createCell(cellNum++).setCellValue(report.getDepreciationCode());
+                dataRow.createCell(cellNum++).setCellValue(report.getUsefulLifeMonths() != null ? report.getUsefulLifeMonths() : 0);
+                dataRow.createCell(cellNum++).setCellValue(report.getVendorName());
+                dataRow.createCell(cellNum++).setCellValue(report.getVendorNumber());
+                dataRow.createCell(cellNum++).setCellValue(report.getProjectNumber());
+                dataRow.createCell(cellNum++).setCellValue(report.getDateOfService() != null ? dateFormat.format(report.getDateOfService()) : "");
+                dataRow.createCell(cellNum++).setCellValue(report.getOldFarCategory());
+                dataRow.createCell(cellNum++).setCellValue(report.getCostCenterData());
+                dataRow.createCell(cellNum++).setCellValue(report.getAdjustment() != null ? report.getAdjustment().doubleValue() : 0);
+                dataRow.createCell(cellNum++).setCellValue(report.getTaskId());
+                dataRow.createCell(cellNum++).setCellValue(report.getPoLineNumber());
+                dataRow.createCell(cellNum++).setCellValue(report.getMonthlyDepreciationAmount() != null ? report.getMonthlyDepreciationAmount().doubleValue() : 0);
+                dataRow.createCell(cellNum++).setCellValue(report.getAccumulatedDepreciation() != null ? report.getAccumulatedDepreciation().doubleValue() : 0);
+                dataRow.createCell(cellNum++).setCellValue(report.getStatusFlag());
+                dataRow.createCell(cellNum++).setCellValue(report.getNetCost() != null ? report.getNetCost().doubleValue() : 0);
+            }
+
+            try (ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+                workbook.write(baos);
+                return baos.toByteArray();
+            } finally {
+                workbook.dispose();
+            }
+        } catch (Exception e) {
+            logger.error("Error generating Excel", e);
+            throw e;
+        }
     }
 }

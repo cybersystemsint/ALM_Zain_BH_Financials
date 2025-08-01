@@ -7,15 +7,11 @@ import javax.persistence.Entity;
 import javax.persistence.GeneratedValue;
 import javax.persistence.GenerationType;
 import javax.persistence.Id;
-import javax.persistence.PostPersist;
 import javax.persistence.PrePersist;
 import javax.persistence.PreUpdate;
 import javax.persistence.Table;
 import javax.persistence.Temporal;
 import javax.persistence.TemporalType;
-
-
-
 
 @Entity
 @Table(name = "tb_NELicense")
@@ -25,14 +21,11 @@ public class NELicense {
     @Column(name = "id")
     private Long id;
 
-
     @Column(name = "LicenseId")
     private String licenseId;
 
-
     @Column(name = "LicenseDetail")
     private String licenseDetail;
-
 
     @Column(name = "NodeId")
     private String nodeId;
@@ -55,10 +48,10 @@ public class NELicense {
     @Column(name = "Allocated")
     private Integer allocated;
 
-    @Column(name = "Usage%")
+    @Column(name = "`Usage%`")
     private BigDecimal usagePercent;
 
-    @Column(name = "Usage")
+    @Column(name = "`Usage`")
     private Integer usage;
 
     @Column(name = "Config")
@@ -95,8 +88,6 @@ public class NELicense {
     public void setId(Long id) {
         this.id = id;
     }
-
-
 
 
     public String getLicenseId() {

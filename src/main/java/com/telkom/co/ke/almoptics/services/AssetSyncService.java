@@ -10,11 +10,14 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Slice;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import javax.annotation.PostConstruct;
+import javax.persistence.EntityManagerFactory;
 import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
@@ -24,7 +27,9 @@ import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
-
+import java.util.stream.Stream;
+import javax.persistence.EntityManager;
+import javax.persistence.EntityTransaction;
 /**
  * Service responsible for synchronizing assets between inventory and financial report systems.
  * Handles detection of new, existing, decommissioned, unmapped, and missing assets.
@@ -37,6 +42,7 @@ public class AssetSyncService {
     private static final int MISSING_ASSET_GRACE_PERIOD_DAYS = 14;
     private static final int MAX_RETRIES = 3;
     private static final long BASE_BACKOFF_MS = 2000;
+    private volatile boolean isSyncRunning = false;
 
     @Autowired
     private FinancialReportRepo financialReportRepo;
@@ -72,11 +78,14 @@ public class AssetSyncService {
     private UnmappedInventoryService unmappedInventoryService;
 
     @Autowired
-    private NotificationService notificationService;
+    private EntityManagerFactory entityManagerFactory;
+//    @Autowired
+//    private NotificationService notificationService;
 
     /**
      * Custom retry logic for database operations
      */
+
     private <T> T retryOperation(Supplier<T> operation, String operationName) {
         int attempt = 0;
         while (attempt < MAX_RETRIES) {
@@ -117,10 +126,10 @@ public class AssetSyncService {
             logger.info("Completed scheduled asset synchronization");
         } catch (Exception e) {
             logger.error("Error during scheduled asset synchronization: {}", e.getMessage());
-            notificationService.sendNotification(
-                    "Asset Sync Error",
-                    "Daily asset sync failed: " + e.getMessage()
-            );
+//            notificationService.sendNotification(
+//                    "Asset Sync Error",
+//                    "Daily asset sync failed: " + e.getMessage()
+//            );
             throw e;
         }
     }
@@ -129,23 +138,25 @@ public class AssetSyncService {
      * Async method to sync Active assets with batching
      */
     @Async
-    @Transactional(timeout = 120)
+    @Transactional(timeout = 300, readOnly = true)
     public CompletableFuture<Void> syncActiveAssetsAsync() {
         logger.info("Starting async sync for Active assets");
         return retryOperation(() -> {
-            Pageable pageable = PageRequest.of(0, BATCH_SIZE);
-            long totalRecords = activeInventoryRepository.count();
-            int totalPages = (int) Math.ceil((double) totalRecords / BATCH_SIZE);
-
-            for (int page = 0; page < totalPages; page++) {
-                pageable = PageRequest.of(page, BATCH_SIZE);
-                List<ActiveInventory> batch = activeInventoryRepository.findAll(pageable).getContent();
+            Pageable pageable = PageRequest.of(0, BATCH_SIZE);  // Start at page 0
+            Slice<ActiveInventory> slice = activeInventoryRepository.findAll(pageable);  // Use Slice, not Page
+            while (slice.hasContent()) {
+                List<ActiveInventory> batch = slice.getContent();
                 List<String> serials = batch.stream()
                         .map(ActiveInventory::getSerialNumber)
                         .filter(Objects::nonNull)
                         .distinct()
                         .collect(Collectors.toList());
                 processBatchSync(serials, "ACTIVE");
+                if (!slice.hasNext()) {
+                    break;  // No more data
+                }
+                pageable = slice.nextPageable();  // Advance to next batch
+                slice = activeInventoryRepository.findAll(pageable);
             }
             logger.info("Completed async sync for Active assets");
             return CompletableFuture.completedFuture(null);
@@ -156,29 +167,30 @@ public class AssetSyncService {
      * Async method to sync Passive assets with batching
      */
     @Async
-    @Transactional(timeout = 120)
+    @Transactional(timeout = 300, readOnly = true)  // Keep transactional; add readOnly if no writes in this method; timeout as safety net
     public CompletableFuture<Void> syncPassiveAssetsAsync() {
         logger.info("Starting async sync for Passive assets");
         return retryOperation(() -> {
-            Pageable pageable = PageRequest.of(0, BATCH_SIZE);
-            long totalRecords = passiveInventoryRepository.count();
-            int totalPages = (int) Math.ceil((double) totalRecords / BATCH_SIZE);
-
-            for (int page = 0; page < totalPages; page++) {
-                pageable = PageRequest.of(page, BATCH_SIZE);
-                List<PassiveInventory> batch = passiveInventoryRepository.findAll(pageable).getContent();
-                List<String> serials = batch.stream()
-                        .map(PassiveInventory::getSerial)
+            Pageable pageable = PageRequest.of(0, BATCH_SIZE);  // Start at page 0
+            Slice<PassiveInventory> slice = passiveInventoryRepository.findAll(pageable);  // Use Slice instead of Page
+            while (slice.hasContent()) {  // Loop until no more content
+                List<PassiveInventory> batch = slice.getContent();
+                List<String> identifiers = batch.stream()
+                        .flatMap(asset -> Stream.of(asset.getSerial(), asset.getObjectId()))
                         .filter(Objects::nonNull)
                         .distinct()
                         .collect(Collectors.toList());
-                processBatchSync(serials, "PASSIVE");
+                processBatchSync(identifiers, "PASSIVE");  // Your existing batch processing
+                if (!slice.hasNext()) {
+                    break;  // No more data
+                }
+                pageable = slice.nextPageable();  // Get next batch pageable
+                slice = passiveInventoryRepository.findAll(pageable);
             }
             logger.info("Completed async sync for Passive assets");
             return CompletableFuture.completedFuture(null);
         }, "syncPassiveAssetsAsync");
     }
-
     /**
      * Async method to sync IT assets with batching
      */
@@ -194,12 +206,12 @@ public class AssetSyncService {
             for (int page = 0; page < totalPages; page++) {
                 pageable = PageRequest.of(page, BATCH_SIZE);
                 List<ItInventory> batch = itInventoryRepository.findAll(pageable).getContent();
-                List<String> serials = batch.stream()
-                        .map(ItInventory::getHostSerialNumber)
+                List<String> identifiers = batch.stream()
+                        .flatMap(asset -> Stream.of(asset.getHostSerialNumber(), asset.getObjectId()))
                         .filter(Objects::nonNull)
                         .distinct()
                         .collect(Collectors.toList());
-                processBatchSync(serials, "IT");
+                processBatchSync(identifiers, "IT");
             }
             logger.info("Completed async sync for IT assets");
             return CompletableFuture.completedFuture(null);
@@ -231,26 +243,50 @@ public class AssetSyncService {
     /**
      * Rebuild unmapped inventories from scratch
      */
+    /**
+     * Rebuild unmapped inventories from scratch
+     */
     @Async
     @Transactional(timeout = 120)
     public CompletableFuture<Void> rebuildUnmappedInventoriesAsync() {
         logger.info("Rebuilding unmapped inventories from scratch");
         return retryOperation(() -> {
-            // Clear all existing unmapped records
+            // Clear all existing unmapped records using native queries
             logger.info("Clearing existing unmapped inventory records");
-            retryOperation(() -> {
-                unmappedActiveInventoryRepository.deleteAll();
-                return null;
-            }, "deleteAllUnmappedActive");
-            retryOperation(() -> {
-                unmappedPassiveInventoryRepository.deleteAll();
-                return null;
-            }, "deleteAllUnmappedPassive");
-            retryOperation(() -> {
-                unmappedITInventoryRepository.deleteAll();
-                return null;
-            }, "deleteAllUnmappedIT");
-            logAudit(null, null, "CLEAR", "CLEAR", null, "Cleared all unmapped inventory tables before rebuild");
+            EntityManager entityManager = entityManagerFactory.createEntityManager();
+            EntityTransaction transaction = entityManager.getTransaction();
+            try {
+                transaction.begin();
+
+                // Delete from tb_UnmappedActive_Inventory
+                retryOperation(() -> {
+                    entityManager.createNativeQuery("DELETE FROM tb_unmappednode").executeUpdate();
+                    return null;
+                }, "deleteAllUnmappedActive");
+
+                // Delete from tb_UnmappedPassive_Inventory
+                retryOperation(() -> {
+                    entityManager.createNativeQuery("DELETE FROM tb_unmappedPassive_Inventory").executeUpdate();
+                    return null;
+                }, "deleteAllUnmappedPassive");
+
+                // Delete from tb_UnmappedIT_Inventory
+                retryOperation(() -> {
+                    entityManager.createNativeQuery("DELETE FROM tb_unmappedIT_INVENTORY").executeUpdate();
+                    return null;
+                }, "deleteAllUnmappedIT");
+
+                transaction.commit();
+                logAudit(null, null, "CLEAR", "CLEAR", null, "Cleared all unmapped inventory tables before rebuild");
+            } catch (Exception e) {
+                if (transaction.isActive()) {
+                    transaction.rollback();
+                }
+                logger.error("Error clearing unmapped inventory tables: {}", e.getMessage());
+                throw e;
+            } finally {
+                entityManager.close();
+            }
 
             // Rebuild unmapped inventories
             Pageable pageable = PageRequest.of(0, BATCH_SIZE);
@@ -272,12 +308,12 @@ public class AssetSyncService {
             for (int page = 0; page < totalPassivePages; page++) {
                 pageable = PageRequest.of(page, BATCH_SIZE);
                 List<PassiveInventory> batch = passiveInventoryRepository.findAll(pageable).getContent();
-                List<String> serials = batch.stream()
-                        .map(PassiveInventory::getSerial)
+                List<String> identifiers = batch.stream()
+                        .flatMap(asset -> Stream.of(asset.getSerial(), asset.getObjectId()))
                         .filter(Objects::nonNull)
                         .distinct()
                         .collect(Collectors.toList());
-                processBatchForUnmapped(serials, "PASSIVE");
+                processBatchSync(identifiers, "PASSIVE");
             }
 
             long totalIt = itInventoryRepository.count();
@@ -285,12 +321,12 @@ public class AssetSyncService {
             for (int page = 0; page < totalItPages; page++) {
                 pageable = PageRequest.of(page, BATCH_SIZE);
                 List<ItInventory> batch = itInventoryRepository.findAll(pageable).getContent();
-                List<String> serials = batch.stream()
-                        .map(ItInventory::getHostSerialNumber)
+                List<String> identifiers = batch.stream()
+                        .flatMap(asset -> Stream.of(asset.getHostSerialNumber(), asset.getObjectId()))
                         .filter(Objects::nonNull)
                         .distinct()
                         .collect(Collectors.toList());
-                processBatchForUnmapped(serials, "IT");
+                processBatchSync(identifiers, "IT");
             }
 
             logger.info("Completed rebuilding unmapped inventories");
@@ -302,20 +338,29 @@ public class AssetSyncService {
      * Process a batch of assets for synchronization
      */
     private void processBatchSync(List<String> identifiers, String type) {
-        List<tb_FinancialReport> frAssets = retryOperation(
-                () -> financialReportRepo.findByAssetSerialNumberIn(identifiers),
-                "findByAssetSerialNumberIn"
-        );
-        Set<String> frSerials = frAssets.stream()
-                .map(tb_FinancialReport::getAssetSerialNumber)
+        List<tb_FinancialReport> frAssets;
+        if ("ACTIVE".equalsIgnoreCase(type)) {
+            frAssets = retryOperation(
+                    () -> financialReportRepo.findByAssetSerialNumberIn(identifiers),
+                    "findByAssetSerialNumberIn"
+            );
+        } else {
+            frAssets = retryOperation(
+                    () -> financialReportRepo.findByAssetNameOrAssetSerialNumberIn(identifiers),
+                    "findByAssetNameOrAssetSerialNumberIn"
+            );
+        }
+        Set<String> frIdentifiers = frAssets.stream()
+                .flatMap(fr -> Stream.of(fr.getAssetSerialNumber(), fr.getAssetName()))
+                .filter(Objects::nonNull)
                 .collect(Collectors.toSet());
 
-        // Process assets in FR
+        // Process assets in financial report
         frAssets.forEach(this::processFinancialReportAsset);
 
-        // Process assets not in FR (map to unmapped)
+        // Process assets not in financial report (add to unmapped)
         identifiers.stream()
-                .filter(id -> !frSerials.contains(id))
+                .filter(id -> !frIdentifiers.contains(id))
                 .forEach(id -> handleAssetNotInFinancialReport(id, type));
     }
 
@@ -323,16 +368,25 @@ public class AssetSyncService {
      * Process a batch for unmapped inventory rebuilding
      */
     private void processBatchForUnmapped(List<String> identifiers, String type) {
-        List<tb_FinancialReport> frAssets = retryOperation(
-                () -> financialReportRepo.findByAssetSerialNumberIn(identifiers),
-                "findByAssetSerialNumberIn"
-        );
-        Set<String> frSerials = frAssets.stream()
-                .map(tb_FinancialReport::getAssetSerialNumber)
+        List<tb_FinancialReport> frAssets;
+        if ("ACTIVE".equalsIgnoreCase(type)) {
+            frAssets = retryOperation(
+                    () -> financialReportRepo.findByAssetSerialNumberIn(identifiers),
+                    "findByAssetSerialNumberIn"
+            );
+        } else {
+            frAssets = retryOperation(
+                    () -> financialReportRepo.findByAssetNameOrAssetSerialNumberIn(identifiers),
+                    "findByAssetNameOrAssetSerialNumberIn"
+            );
+        }
+        Set<String> frIdentifiers = frAssets.stream()
+                .flatMap(fr -> Stream.of(fr.getAssetSerialNumber(), fr.getAssetName()))
+                .filter(Objects::nonNull)
                 .collect(Collectors.toSet());
 
         identifiers.stream()
-                .filter(id -> !frSerials.contains(id))
+                .filter(id -> !frIdentifiers.contains(id))
                 .forEach(id -> handleAssetNotInFinancialReport(id, type));
     }
 
@@ -371,14 +425,16 @@ public class AssetSyncService {
         }
 
         // Remove from unmapped inventory if present
-        removeFromUnmappedInventory(asset.getAssetSerialNumber(), asset.getNodeType());
+//        removeFromUnmappedInventory(asset.getAssetSerialNumber(), asset.getNodeType());
 
+        removeFromUnmappedInventory(asset.getAssetSerialNumber(), asset.getAssetName());
         // Check for missing assets every 14 days
         LocalDateTime lastChangeDate = changeDateRaw != null
                 ? changeDateRaw.toInstant().atZone(ZoneId.systemDefault()).toLocalDateTime()
                 : insertDate;
         if (ChronoUnit.DAYS.between(lastChangeDate, now) >= 14) {
-            boolean foundInInventory = checkAssetInInventories(asset.getAssetSerialNumber(), asset.getNodeType());
+            boolean foundInInventory = checkAssetInInventories(asset.getAssetSerialNumber(), asset.getAssetName());
+//            boolean foundInInventory = checkAssetInInventories(asset.getAssetSerialNumber(), asset.getNodeType());
             if (!foundInInventory && !"DECOMMISSIONED".equals(asset.getStatusFlag())) {
                 // Mark as potentially missing if not already marked
                 if (asset.getRetirementDate() == null) {
@@ -437,41 +493,51 @@ public class AssetSyncService {
     /**
      * Remove asset from unmapped inventory
      */
-    private void removeFromUnmappedInventory(String serialNumber, String nodeType) {
-        switch (nodeType.toUpperCase()) {
-            case "ACTIVE":
-                if (unmappedActiveInventoryRepository.findBySerialNumber(serialNumber).isPresent()) {
-                    retryOperation(() -> {
-                        unmappedActiveInventoryRepository.deleteBySerialNumber(serialNumber);
-                        return null;
-                    }, "deleteUnmappedActive");
-                    logAudit(null, serialNumber, "UNMAPPED", "MAPPED", nodeType,
-                            "Asset " + serialNumber + " removed from unmapped ACTIVE inventory");
+    private void removeFromUnmappedInventory(String serialNumber, String objectId) {
+        String identifier = serialNumber != null ? serialNumber : objectId;
+        if (identifier == null) {
+            logger.warn("Skipping removal from unmapped inventory: both serialNumber and objectId are null");
+            return;
+        }
+
+        // Check and delete from Active unmapped inventory
+        if (serialNumber != null && unmappedActiveInventoryRepository.findBySerialNumber(serialNumber).isPresent()) {
+            retryOperation(() -> {
+                unmappedActiveInventoryRepository.deleteBySerialNumber(serialNumber);
+                return null;
+            }, "deleteUnmappedActive");
+            logAudit(null, serialNumber, "UNMAPPED", "MAPPED", "ACTIVE",
+                    "Asset " + serialNumber + " removed from unmapped ACTIVE inventory");
+        }
+
+        // Check and delete from Passive unmapped inventory
+        if (unmappedPassiveInventoryRepository.findBySerialOrObjectId(serialNumber, objectId).isPresent()) {
+            retryOperation(() -> {
+                if (serialNumber != null) {
+                    unmappedPassiveInventoryRepository.deleteBySerial(serialNumber);
                 }
-                break;
-            case "PASSIVE":
-                if (unmappedPassiveInventoryRepository.findBySerialOrObjectId(serialNumber, serialNumber).isPresent()) {
-                    retryOperation(() -> {
-                        unmappedPassiveInventoryRepository.deleteBySerial(serialNumber);
-                        unmappedPassiveInventoryRepository.deleteByObjectId(serialNumber);
-                        return null;
-                    }, "deleteUnmappedPassive");
-                    logAudit(null, serialNumber, "UNMAPPED", "MAPPED", nodeType,
-                            "Asset " + serialNumber + " removed from unmapped PASSIVE inventory");
+                if (objectId != null) {
+                    unmappedPassiveInventoryRepository.deleteByObjectId(objectId);
                 }
-                break;
-            case "IT":
-                if (unmappedITInventoryRepository.findByHardwareSerialNumber(serialNumber).isPresent()) {
-                    retryOperation(() -> {
-                        unmappedITInventoryRepository.deleteByHardwareSerialNumber(serialNumber);
-                        return null;
-                    }, "deleteUnmappedIT");
-                    logAudit(null, serialNumber, "UNMAPPED", "MAPPED", nodeType,
-                            "Asset " + serialNumber + " removed from unmapped IT inventory");
+                return null;
+            }, "deleteUnmappedPassive");
+            logAudit(null, identifier, "UNMAPPED", "MAPPED", "PASSIVE",
+                    "Asset " + identifier + " removed from unmapped PASSIVE inventory");
+        }
+
+        // Check and delete from IT unmapped inventory
+        if (unmappedITInventoryRepository.findByHardwareSerialNumberOrElementId(serialNumber, objectId).isPresent()) {
+            retryOperation(() -> {
+                if (serialNumber != null) {
+                    unmappedITInventoryRepository.deleteByHardwareSerialNumber(serialNumber);
                 }
-                break;
-            default:
-                logger.warn("Unknown nodeType {} for asset {}, skipping unmapped deletion", nodeType, serialNumber);
+                if (objectId != null) {
+                    unmappedITInventoryRepository.deleteByElementId(objectId);
+                }
+                return null;
+            }, "deleteUnmappedIT");
+            logAudit(null, identifier, "UNMAPPED", "MAPPED", "IT",
+                    "Asset " + identifier + " removed from unmapped IT inventory");
         }
     }
 
@@ -479,10 +545,14 @@ public class AssetSyncService {
      * Handle asset not found in Financial Report
      */
     private void handleAssetNotInFinancialReport(String identifier, String type) {
-        // Check for duplicates in main inventory
+        if (identifier == null) {
+            logger.warn("Skipping null identifier for {} asset", type);
+            return;
+        }
         boolean hasDuplicates = checkForInventoryDuplicates(identifier, type);
         if (hasDuplicates) {
-            return; // Silently skip duplicates
+            logger.info("Skipping duplicate identifier {} for {} asset", identifier, type);
+            return;
         }
 
         boolean alreadyUnmapped = false;
@@ -491,24 +561,34 @@ public class AssetSyncService {
                 alreadyUnmapped = unmappedActiveInventoryRepository.findBySerialNumber(identifier).isPresent();
                 if (!alreadyUnmapped) {
                     unmappedInventoryService.mapActiveInventoryBySerialNumber(identifier, "SYSTEM");
-                    logAudit(null, identifier, "UNKNOWN", "UNMAPPED", type,
+                    logAudit(null, identifier, "UNKNOWN", "UNMAPPED", "ACTIVE",
                             "Asset " + identifier + " added to unmapped ACTIVE inventory");
                 }
                 break;
             case "PASSIVE":
                 alreadyUnmapped = unmappedPassiveInventoryRepository.findBySerialOrObjectId(identifier, identifier).isPresent();
                 if (!alreadyUnmapped) {
-                    unmappedInventoryService.mapPassiveInventoryByIdentifier(identifier, "SYSTEM");
-                    logAudit(null, identifier, "UNKNOWN", "UNMAPPED", type,
-                            "Asset " + identifier + " added to unmapped PASSIVE inventory");
+                    Optional<UnmappedPassiveInventory> unmappedOpt = unmappedInventoryService.mapPassiveInventoryByIdentifier(identifier, "SYSTEM");
+                    if (unmappedOpt.isPresent()) {
+                        logAudit(null, identifier, "UNKNOWN", "UNMAPPED", "PASSIVE",
+                                "Asset " + identifier + " added to unmapped PASSIVE inventory");
+                    } else {
+                        logger.warn("Failed to map passive inventory for identifier: {}", identifier);
+                    }
                 }
                 break;
             case "IT":
-                alreadyUnmapped = unmappedITInventoryRepository.findByHardwareSerialNumber(identifier).isPresent();
+                alreadyUnmapped = unmappedITInventoryRepository.findByHardwareSerialNumberOrElementId(identifier, identifier).isPresent();
                 if (!alreadyUnmapped) {
-                    unmappedInventoryService.mapITInventoryByIdentifier(identifier, "SYSTEM");
-                    logAudit(null, identifier, "UNKNOWN", "UNMAPPED", type,
-                            "Asset " + identifier + " added to unmapped IT inventory");
+                    Optional<ItInventory> itAsset = itInventoryRepository.findByHostSerialNumber(identifier)
+                            .or(() -> itInventoryRepository.findByObjectId(identifier));
+                    if (itAsset.isPresent()) {
+                        unmappedInventoryService.mapITInventoryByIdentifier(identifier, "SYSTEM");
+                        logAudit(null, identifier, "UNKNOWN", "UNMAPPED", "IT",
+                                "Asset " + identifier + " added to unmapped IT inventory");
+                    } else {
+                        logger.warn("No ItInventory found for identifier {}", identifier);
+                    }
                 }
                 break;
             default:
@@ -546,31 +626,34 @@ public class AssetSyncService {
     /**
      * Check if asset exists in Active, Passive, or IT inventory
      */
-    private boolean checkAssetInInventories(String identifier, String nodeType) {
-        if (identifier == null || nodeType == null) {
+    private boolean checkAssetInInventories(String serialNumber, String objectId) {
+        if (serialNumber == null && objectId == null) {
             return false;
         }
-        switch (nodeType.toUpperCase()) {
-            case "ACTIVE":
-                return retryOperation(
-                        () -> !activeInventoryRepository.findBySerialNumber(identifier).isEmpty(),
-                        "checkActiveInventory"
-                );
-            case "PASSIVE":
-                return retryOperation(
-                        () -> !passiveInventoryRepository.findByObjectIdOrSerialNumber(identifier, identifier).isEmpty(),
-                        "checkPassiveInventory"
-                );
-            case "IT":
-                return retryOperation(
-                        () -> !itInventoryRepository.findByObjectIdOrHostSerialNumber(identifier, identifier).isEmpty(),
-                        "checkITInventory"
-                );
-            default:
-                logger.warn("Unknown nodeType {} for identifier {}", nodeType, identifier);
-                return false;
+        // Check Active inventory
+        if (serialNumber != null && retryOperation(
+                () -> !activeInventoryRepository.findBySerialNumber(serialNumber).isEmpty(),
+                "checkActiveInventory"
+        )) {
+            return true;
         }
+        // Check Passive inventory
+        if (retryOperation(
+                () -> !passiveInventoryRepository.findByObjectIdOrSerialNumber(objectId, serialNumber).isEmpty(),
+                "checkPassiveInventory"
+        )) {
+            return true;
+        }
+        // Check IT inventory
+        if (retryOperation(
+                () -> !itInventoryRepository.findByObjectIdOrHostSerialNumber(objectId, serialNumber).isEmpty(),
+                "checkITInventory"
+        )) {
+            return true;
+        }
+        return false;
     }
+
 
     /**
      * Trigger approval workflow with specific original status
@@ -637,6 +720,7 @@ public class AssetSyncService {
                 asset != null ? asset.getNodeType() : null, notes);
     }
 
+
     private void logAudit(tb_FinancialReport asset, String serialNumber, String previousStatus, String newStatus,
                           String nodeType, String notes) {
         AuditLog auditLog = new AuditLog();
@@ -652,6 +736,7 @@ public class AssetSyncService {
             return null;
         }, "saveAuditLog");
     }
+
 
     /**
      * Send notification about missing or decommissioned assets
@@ -679,7 +764,7 @@ public class AssetSyncService {
                     " days, it will be automatically marked as DECOMMISSIONED.";
         }
 
-        notificationService.sendNotification(subject, message);
+//        notificationService.sendNotification(subject, message);
     }
 
     /**
@@ -758,10 +843,12 @@ public class AssetSyncService {
             logger.warn("Skipping {} asset with both null objectId and serialNumber", nodeType);
             return;
         }
+
         Optional<tb_FinancialReport> financialReportOpt = retryOperation(
-                () -> financialReportRepo.findByAssetNameOrAssetSerialNumberExact(objectId, serialNumber),
-                "findByAssetNameOrAssetSerialNumberExact"
+                () -> financialReportRepo.findByAssetNameOrAssetSerialNumber(objectId, serialNumber),
+                "findByAssetNameOrAssetSerialNumber"
         );
+
         processFinancialReportMatch(financialReportOpt, objectId, serialNumber, nodeType);
     }
 
@@ -771,9 +858,19 @@ public class AssetSyncService {
     private void processFinancialReportMatch(Optional<tb_FinancialReport> financialReportOpt,
                                              String objectId, String serialNumber, String nodeType) {
         if (financialReportOpt.isPresent()) {
+            logger.info("Found financial report match for {} asset: objectId={}, serialNumber={}",
+                    nodeType, objectId, serialNumber);
             processFinancialReportAsset(financialReportOpt.get());
         } else {
-            handleAssetNotInFinancialReport(serialNumber, nodeType);
+            logger.warn("No financial report match for {} asset: objectId={}, serialNumber={}",
+                    nodeType, objectId, serialNumber);
+            String identifier = serialNumber != null ? serialNumber : objectId;
+            if (identifier != null) {
+                handleAssetNotInFinancialReport(identifier, nodeType);
+            } else {
+                logger.warn("Skipping unmapped addition for {} asset with both null identifiers", nodeType);
+            }
         }
     }
+
 }

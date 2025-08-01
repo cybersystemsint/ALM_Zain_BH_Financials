@@ -1,23 +1,34 @@
 package com.telkom.co.ke.almoptics.serviceImplementor;
 
+import com.telkom.co.ke.almoptics.entities.FinancialReportProjection;
+import com.telkom.co.ke.almoptics.entities.tb_Asset_Depreciation;
 import com.telkom.co.ke.almoptics.entities.tb_FinancialReport;
 import com.telkom.co.ke.almoptics.repository.FinancialReportRepo;
 import com.telkom.co.ke.almoptics.services.ApprovalWorkflowService;
 import com.telkom.co.ke.almoptics.services.FinancialReportService;
+import com.telkom.co.ke.almoptics.services.tb_Asset_DepreciationService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.domain.Specification;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
 import java.time.LocalDate;
 import java.time.YearMonth;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
 
 @Service
 public class FinanceReportServiceImpl implements FinancialReportService {
@@ -30,8 +41,14 @@ public class FinanceReportServiceImpl implements FinancialReportService {
     @Autowired
     private ApprovalWorkflowService approvalWorkflowService;
 
+    @Autowired
+    private tb_Asset_DepreciationService depreciationService;
+
     private final com.fasterxml.jackson.databind.ObjectMapper objectMapper = new com.fasterxml.jackson.databind.ObjectMapper();
 
+    private static final int MAX_PAGE_NUMBER = 100;
+
+    // Modified method in FinanceReportServiceImpl.java
     @Override
     @Transactional
     public tb_FinancialReport calculateDepreciation(String serialNumber, BigDecimal adjustment, String username) {
@@ -117,22 +134,22 @@ public class FinanceReportServiceImpl implements FinancialReportService {
                             java.time.temporal.ChronoUnit.MONTHS));
         }
 
-        // Calculate Accumulated Depreciation (AD = MD * NoMU + ADJ)
-        BigDecimal accumulatedDepreciation = monthlyDepreciation
-                .multiply(new BigDecimal(numberOfMonthsUtilised))
-                .add(adjustment)
-                .setScale(3, RoundingMode.HALF_UP);
+        // Calculate x = MD * NoMU
+        BigDecimal x = monthlyDepreciation.multiply(new BigDecimal(numberOfMonthsUtilised));
+
+        // Calculate Accumulated Depreciation (AD = x + ADJ)
+        BigDecimal accumulatedDepreciation = x.add(adjustment).setScale(3, RoundingMode.HALF_UP);
+
+        // Enforce x + p <= A
+        if (accumulatedDepreciation.compareTo(report.getInitialCost()) > 0) {
+            logger.error("x + p exceeds initial cost for serial number: {}", serialNumber);
+            throw new IllegalArgumentException("x + p cannot exceed initial cost");
+        }
 
         // Ensure AD does not exceed (IC - Salvage Value)
         BigDecimal maxAccumulatedDepreciation = report.getInitialCost()
                 .subtract(report.getSalvageValue()).setScale(3, RoundingMode.HALF_UP);
         accumulatedDepreciation = accumulatedDepreciation.min(maxAccumulatedDepreciation);
-
-        // Check if AD + ADJ <= IC
-        if (accumulatedDepreciation.add(adjustment).compareTo(report.getInitialCost()) > 0) {
-            logger.error("Accumulated depreciation + adjustment exceeds initial cost for serial number: {}", serialNumber);
-            throw new IllegalArgumentException("Accumulated depreciation plus adjustment cannot exceed initial cost");
-        }
 
         report.setAccumulatedDepreciation(accumulatedDepreciation);
         report.setAdjustment(adjustment);
@@ -145,8 +162,8 @@ public class FinanceReportServiceImpl implements FinancialReportService {
         // Ensure NC is not less than Salvage Value
         netCost = netCost.max(report.getSalvageValue());
 
-        // Stop calculations if NC = 0
-        if (netCost.compareTo(BigDecimal.ZERO) <= 0) {
+        // Stop calculations if NC <= 0 or reaches salvage value
+        if (netCost.compareTo(BigDecimal.ZERO) <= 0 || netCost.compareTo(report.getSalvageValue()) <= 0) {
             netCost = report.getSalvageValue();
             accumulatedDepreciation = report.getInitialCost().subtract(report.getSalvageValue());
             report.setAccumulatedDepreciation(accumulatedDepreciation);
@@ -190,12 +207,138 @@ public class FinanceReportServiceImpl implements FinancialReportService {
         tb_FinancialReport savedReport = financialReportRepo.save(report);
 
         // Trigger approval workflow
-        approvalWorkflowService.createApprovalWorkflow(savedReport, savedReport.getNodeType(),"Pending Modification");
+        approvalWorkflowService.createApprovalWorkflow(savedReport, savedReport.getNodeType(),"Pending Modification", username);
 
         logger.info("Depreciation calculated and saved for serial number: {}", serialNumber);
         return savedReport;
     }
+    // Modified method in FinanceReportServiceImpl.java
+    @Override
+    @Transactional(readOnly = true)
+    public Map<String, Object> calculateDepreciationForMonth(String date, String search, Pageable pageable) {
+        try {
+            // Parse the input date
+            SimpleDateFormat inputFormat = new SimpleDateFormat("d MMM yyyy");
+            Date inputDate = inputFormat.parse(date);
 
+            // Convert to LocalDate and get end of month
+            LocalDate localInputDate = inputDate.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+            LocalDate endOfMonthLocal = YearMonth.from(localInputDate).atEndOfMonth();
+            Date endOfMonth = Date.from(endOfMonthLocal.atStartOfDay(ZoneId.systemDefault()).toInstant());
+
+            // Fetch paginated subset with filters applied (adjusted query to use dateOfService instead of insertDate)
+            Page<tb_FinancialReport> reports = financialReportRepo.findByDateOfServiceBefore(endOfMonth, search, pageable);
+
+            // Check if the requested page is beyond the available data
+            if (pageable.getPageNumber() > reports.getTotalPages() || (pageable.getPageNumber() == reports.getTotalPages() && reports.getTotalElements() == 0)) {
+                Map<String, Object> result = new HashMap<>();
+                result.put("filteredCost", BigDecimal.ZERO.setScale(3, RoundingMode.HALF_UP));
+                result.put("filteredDepreciation", BigDecimal.ZERO.setScale(3, RoundingMode.HALF_UP));
+                result.put("filteredNBV", BigDecimal.ZERO.setScale(3, RoundingMode.HALF_UP));
+                result.put("totalCost", BigDecimal.ZERO.setScale(3, RoundingMode.HALF_UP));
+                result.put("totalDepreciation", BigDecimal.ZERO.setScale(3, RoundingMode.HALF_UP));
+                result.put("totalNBV", BigDecimal.ZERO.setScale(3, RoundingMode.HALF_UP));
+                result.put("totalPages", reports.getTotalPages());
+                result.put("totalItems", reports.getTotalElements());
+                result.put("currentPage", pageable.getPageNumber());
+                result.put("first", pageable.getPageNumber() == 0);
+                result.put("last", true);
+                result.put("size", pageable.getPageSize());
+                result.put("sort", pageable.getSort().toString());
+                result.put("records", Collections.emptyList());
+                return result;
+            }
+
+            List<tb_FinancialReport> filteredReports = reports.getContent();
+
+            // Fetch totals from database
+            BigDecimal totalCost = financialReportRepo.findTotalCostByDateOfServiceBefore(endOfMonth, search);
+            BigDecimal totalDepreciation = financialReportRepo.findTotalDepreciationByDateOfServiceBefore(endOfMonth, search);
+            BigDecimal totalNBV = financialReportRepo.findTotalNBVByDateOfServiceBefore(endOfMonth, search);
+
+            // Recalculate depreciation for paginated filtered reports using the new formula
+            for (tb_FinancialReport report : filteredReports) {
+                if (report.getDateOfService() != null && report.getInitialCost() != null && report.getUsefulLifeMonths() != null) {
+                    try {
+                        LocalDate serviceDate = LocalDate.parse(report.getDateOfService(), DateTimeFormatter.ISO_LOCAL_DATE);
+                        if (serviceDate.isBefore(endOfMonthLocal.plusDays(1)) && report.getUsefulLifeMonths() > 0) {
+                            long monthsActive = ChronoUnit.MONTHS.between(serviceDate, endOfMonthLocal);
+                            if (monthsActive > 0) {
+                                BigDecimal salvageValue = report.getSalvageValue() != null ? report.getSalvageValue() : BigDecimal.ZERO;
+                                BigDecimal monthlyDepreciation = report.getInitialCost()
+                                        .subtract(salvageValue)
+                                        .divide(BigDecimal.valueOf(report.getUsefulLifeMonths()), 3, RoundingMode.HALF_UP);
+
+                                BigDecimal x = monthlyDepreciation.multiply(BigDecimal.valueOf(monthsActive));
+                                BigDecimal adjustment = report.getAdjustment() != null ? report.getAdjustment() : BigDecimal.ZERO;
+                                BigDecimal accumulatedDepreciation = x.add(adjustment).setScale(3, RoundingMode.HALF_UP);
+
+                                // Enforce x + p <= A
+                                if (accumulatedDepreciation.compareTo(report.getInitialCost()) > 0) {
+                                    accumulatedDepreciation = report.getInitialCost(); // Cap at A if violation (or throw, but cap for reports)
+                                }
+
+                                // Cap at max (A - SV)
+                                BigDecimal maxAD = report.getInitialCost().subtract(salvageValue);
+                                accumulatedDepreciation = accumulatedDepreciation.min(maxAD);
+
+                                BigDecimal netCost = report.getInitialCost().subtract(accumulatedDepreciation).setScale(3, RoundingMode.HALF_UP);
+                                netCost = netCost.max(salvageValue);
+
+                                // Stop if NBV <= 0 or = SV
+                                if (netCost.compareTo(BigDecimal.ZERO) <= 0 || netCost.equals(salvageValue)) {
+                                    netCost = salvageValue;
+                                    accumulatedDepreciation = report.getInitialCost().subtract(salvageValue);
+                                }
+
+                                report.setAccumulatedDepreciation(accumulatedDepreciation);
+                                report.setNetCost(netCost);
+                            }
+                        }
+                    } catch (Exception e) {
+                        logger.warn("Error recalculating depreciation for report with serial number {}: {}",
+                                report.getAssetSerialNumber(), e.getMessage());
+                    }
+                }
+            }
+
+            // Calculate filtered values based on paginated data
+            BigDecimal filteredCost = filteredReports.stream()
+                    .map(tb_FinancialReport::getInitialCost)
+                    .filter(Objects::nonNull)
+                    .reduce(BigDecimal.ZERO, BigDecimal::add)
+                    .setScale(3, RoundingMode.HALF_UP);
+
+            BigDecimal filteredDepreciation = filteredReports.stream()
+                    .map(tb_FinancialReport::getAccumulatedDepreciation)
+                    .filter(Objects::nonNull)
+                    .reduce(BigDecimal.ZERO, BigDecimal::add)
+                    .setScale(3, RoundingMode.HALF_UP);
+
+            BigDecimal filteredNBV = filteredCost.subtract(filteredDepreciation)
+                    .setScale(3, RoundingMode.HALF_UP);
+
+            Map<String, Object> result = new HashMap<>();
+            result.put("filteredCost", filteredCost);
+            result.put("filteredDepreciation", filteredDepreciation);
+            result.put("filteredNBV", filteredNBV);
+            result.put("totalCost", totalCost);
+            result.put("totalDepreciation", totalDepreciation);
+            result.put("totalNBV", totalNBV);
+            result.put("totalPages", reports.getTotalPages());
+            result.put("totalItems", reports.getTotalElements());
+            result.put("currentPage", pageable.getPageNumber());
+            result.put("first", pageable.getPageNumber() == 0);
+            result.put("last", pageable.getPageNumber() == reports.getTotalPages() - 1);
+            result.put("size", pageable.getPageSize());
+            result.put("sort", pageable.getSort().toString());
+            result.put("records", filteredReports);
+
+            return result;
+        } catch (ParseException e) {
+            throw new IllegalArgumentException("Invalid date format for date: " + date + ". Expected format: d MMM yyyy (e.g., 5 Jun 2025)", e);
+        }
+    }
     @Override
     public Page<tb_FinancialReport> findByStatusFlagNotAndNetCostGreaterThan(String statusFlag, BigDecimal netCost, Pageable pageable) {
         return financialReportRepo.findByStatusFlagNotAndNetCostGreaterThan(statusFlag, netCost, pageable);
@@ -281,7 +424,6 @@ public class FinanceReportServiceImpl implements FinancialReportService {
         return financialReportRepo.findFilteredDepreciation(search, lastMonthDate).orElse(BigDecimal.ZERO);
     }
 
-
     @Override
     public Page<tb_FinancialReport> findByAssetNameOrSerialNumber(String query, Pageable pageable) {
         return financialReportRepo.findByAssetNameOrAssetSerialNumber(query, pageable);
@@ -291,4 +433,52 @@ public class FinanceReportServiceImpl implements FinancialReportService {
     public Page<tb_FinancialReport> findAll(Specification<tb_FinancialReport> spec, Pageable pageable) {
         return financialReportRepo.findAll(spec, pageable);
     }
+
+    private BigDecimal calculateDepreciation(FinancialReportProjection p, Date endOfMonth) {
+        if (p.getDateOfService() == null || p.getUsefulLifeMonths() == null) return BigDecimal.ZERO;
+
+        SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd");
+        try {
+            Date serviceDate = dateFormat.parse(p.getDateOfService());
+            if (serviceDate.after(endOfMonth)) return BigDecimal.ZERO;
+
+            long monthsActive = ChronoUnit.MONTHS.between(
+                    serviceDate.toInstant().atZone(ZoneId.systemDefault()).toLocalDate(),
+                    endOfMonth.toInstant().atZone(ZoneId.systemDefault()).toLocalDate()
+            );
+
+            if (monthsActive <= 0) return BigDecimal.ZERO;
+
+            BigDecimal monthlyDep = p.getMonthlyDepreciationAmount();
+            if (monthlyDep == null) {
+                monthlyDep = p.getInitialCost()
+                        .subtract(p.getSalvageValue() != null ? p.getSalvageValue() : BigDecimal.ZERO)
+                        .divide(BigDecimal.valueOf(p.getUsefulLifeMonths()), 3, RoundingMode.HALF_UP);
+            }
+
+            return monthlyDep
+                    .multiply(BigDecimal.valueOf(Math.min(monthsActive, p.getUsefulLifeMonths().longValue())))
+                    .setScale(3, RoundingMode.HALF_UP);
+        } catch (ParseException e) {
+            logger.warn("Invalid date format for DateOfService");
+            return BigDecimal.ZERO;
+        }
+    }
+
+
+    @Override
+    public BigDecimal computeMonthlyDepreciation(tb_FinancialReport report) {
+        BigDecimal salvageValue = report.getSalvageValue() != null ? report.getSalvageValue() : BigDecimal.ZERO;
+        return report.getInitialCost()
+                .subtract(salvageValue)
+                .divide(new BigDecimal(report.getUsefulLifeMonths()), 3, RoundingMode.HALF_UP);
+    }
+
+    // Add to FinancialReportService
+    @Transactional(readOnly = true)
+    public List<tb_FinancialReport> findAllByAssetNameInOrAssetSerialNumberIn(List<String> ids) {
+        return financialReportRepo.findByAssetNameInOrAssetSerialNumberIn(ids);
+    }
+
+
 }

@@ -37,7 +37,7 @@ public class UnmappedPassiveInventory implements Serializable {
     @Column(name = "Item_BarCode")
     private String itemBarCode;
 
-    @Column(name = "Serial", unique = true, nullable = false)
+    @Column(name = "Serial", unique = true)
     private String serial;
 
     @Column(name = "UOM")
