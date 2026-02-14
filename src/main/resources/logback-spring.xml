@@ -15,8 +15,8 @@
         </rollingPolicy>
     </appender>
     <root level="INFO">
+        <appender-ref ref="CONSOLE" />
         <appender-ref ref="FILE" />
-
     </root>
 
     <logger name="org.springframework.web" level="INFO"/>

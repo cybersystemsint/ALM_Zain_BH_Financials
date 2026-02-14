@@ -1,0 +1,46 @@
+# Build artifacts
+target/
+bin/
+build/
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+# IDE - Eclipse
+.classpath
+.project
+.settings/
+.apt_generated
+.factorypath
+.springBeans
+.sts4-cache
+
+# IDE - IntelliJ IDEA
+.idea/
+*.iws
+*.iml
+*.ipr
+
+# IDE - NetBeans
+nb-configuration.xml
+nbactions.xml
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+
+# IDE - VS Code
+.vscode/
+
+# Maven wrapper
+!.mvn/wrapper/maven-wrapper.jar
+
+# Temp/Log files
+*.log
+*.tmp
+compile_output.txt
+
+# OS files
+.DS_Store
+Thumbs.db
+$null
