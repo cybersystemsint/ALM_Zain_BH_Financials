@@ -3,6 +3,9 @@ package com.telkom.co.ke.almoptics.controllers;
 import com.telkom.co.ke.almoptics.entities.UnmappedActiveInventory;
 import com.telkom.co.ke.almoptics.entities.UnmappedITInventory;
 import com.telkom.co.ke.almoptics.entities.UnmappedPassiveInventory;
+import com.telkom.co.ke.almoptics.repository.UnmappedActiveInventoryRepository;
+import com.telkom.co.ke.almoptics.repository.UnmappedITInventoryRepository;
+import com.telkom.co.ke.almoptics.repository.UnmappedPassiveInventoryRepository;
 import com.telkom.co.ke.almoptics.services.UnmappedInventoryService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -11,12 +14,16 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import javax.persistence.criteria.Predicate;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -32,6 +39,15 @@ public class InventoryMappingController {
 
     @Autowired
     private UnmappedInventoryService unmappedInventoryService;
+
+    @Autowired
+    private UnmappedActiveInventoryRepository unmappedActiveInventoryRepository;
+
+    @Autowired
+    private UnmappedPassiveInventoryRepository unmappedPassiveInventoryRepository;
+
+    @Autowired
+    private UnmappedITInventoryRepository unmappedITInventoryRepository;
 
     /**
      * Map inventory from source to unmapped inventory by serial number or identifier
@@ -263,5 +279,108 @@ public class InventoryMappingController {
             response.put("message", "Error searching inventory: " + e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(response);
         }
+    }
+
+
+    @PostMapping("/filter/{type}")
+    public ResponseEntity<Map<String, Object>> filterUnmappedInventory(
+            @PathVariable String type,
+            @RequestBody Map<String, String> filters,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "100") int size,
+            @RequestParam(defaultValue = "insertDate") String sortBy,
+            @RequestParam(defaultValue = "desc") String sortDir) {
+
+        Map<String, Object> response = new HashMap<>();
+        response.put("timestamp", LocalDateTime.now());
+
+        // Sort field varies per inventory type (same mapping as the existing
+        // /{type} endpoint).
+        String effectiveSortBy = sortBy;
+        if ("IT".equalsIgnoreCase(type) && "insertDate".equalsIgnoreCase(sortBy)) {
+            effectiveSortBy = "assetInsertDate";
+        } else if ("PASSIVE".equalsIgnoreCase(type) && "insertDate".equalsIgnoreCase(sortBy)) {
+            effectiveSortBy = "entryDate";
+        }
+        Sort sort = sortDir.equalsIgnoreCase("desc")
+                ? Sort.by(effectiveSortBy).descending()
+                : Sort.by(effectiveSortBy).ascending();
+        Pageable pageable = PageRequest.of(page, size, sort);
+
+        try {
+            switch (type.toUpperCase()) {
+                case "ACTIVE": {
+                    Specification<UnmappedActiveInventory> spec = buildEqualsSpec(filters);
+                    Page<UnmappedActiveInventory> resultPage =
+                            unmappedActiveInventoryRepository.findAll(spec, pageable);
+                    response.put("status", "success");
+                    response.put("data", resultPage.getContent());
+                    response.put("currentPage", resultPage.getNumber());
+                    response.put("totalItems", resultPage.getTotalElements());
+                    response.put("totalPages", resultPage.getTotalPages());
+                    return ResponseEntity.ok(response);
+                }
+                case "PASSIVE": {
+                    Specification<UnmappedPassiveInventory> spec = buildEqualsSpec(filters);
+                    Page<UnmappedPassiveInventory> resultPage =
+                            unmappedPassiveInventoryRepository.findAll(spec, pageable);
+                    response.put("status", "success");
+                    response.put("data", resultPage.getContent());
+                    response.put("currentPage", resultPage.getNumber());
+                    response.put("totalItems", resultPage.getTotalElements());
+                    response.put("totalPages", resultPage.getTotalPages());
+                    return ResponseEntity.ok(response);
+                }
+                case "IT": {
+                    Specification<UnmappedITInventory> spec = buildEqualsSpec(filters);
+                    Page<UnmappedITInventory> resultPage =
+                            unmappedITInventoryRepository.findAll(spec, pageable);
+                    response.put("status", "success");
+                    response.put("data", resultPage.getContent());
+                    response.put("currentPage", resultPage.getNumber());
+                    response.put("totalItems", resultPage.getTotalElements());
+                    response.put("totalPages", resultPage.getTotalPages());
+                    return ResponseEntity.ok(response);
+                }
+                default:
+                    response.put("status", "error");
+                    response.put("message", "Invalid inventory type: " + type);
+                    return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(response);
+            }
+        } catch (Exception e) {
+            logger.error("Error filtering unmapped inventory: ", e);
+            response.put("status", "error");
+            response.put("message", "Error filtering inventory: " + e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(response);
+        }
+    }
+
+    /**
+     * Build a generic JPA Specification that AND-combines case-insensitive
+     * LIKE predicates for every non-empty (attribute,value) pair in the
+     * filter map. Unknown attribute names are ignored rather than throwing,
+     * so the UI can post a wide attribute set without first interrogating
+     * the schema.
+     */
+    private <T> Specification<T> buildEqualsSpec(Map<String, String> filters) {
+        return (root, query, cb) -> {
+            List<Predicate> predicates = new ArrayList<>();
+            if (filters != null) {
+                for (Map.Entry<String, String> entry : filters.entrySet()) {
+                    String key = entry.getKey();
+                    String value = entry.getValue();
+                    if (key == null || value == null || value.trim().isEmpty()) continue;
+                    try {
+                        predicates.add(cb.like(
+                                cb.lower(root.get(key).as(String.class)),
+                                "%" + value.toLowerCase().trim() + "%"));
+                    } catch (IllegalArgumentException ignore) {
+                        logger.debug("Filter attribute {} not present on entity – skipping", key);
+                    }
+                }
+            }
+            return predicates.isEmpty() ? cb.conjunction()
+                    : cb.and(predicates.toArray(new Predicate[0]));
+        };
     }
 }

@@ -1,15 +1,22 @@
 package com.telkom.co.ke.almoptics.controllers;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.telkom.co.ke.almoptics.dto.ApprovalRequest;
+import com.telkom.co.ke.almoptics.dto.PageResult;
 import com.telkom.co.ke.almoptics.entities.WriteOffReport;
 import com.telkom.co.ke.almoptics.entities.tb_FinancialReport;
 import com.telkom.co.ke.almoptics.entities.tb_ApprovalWorkflow;
 import com.telkom.co.ke.almoptics.models.ApprovalWorkflow;
 import com.telkom.co.ke.almoptics.repository.*;
+import com.telkom.co.ke.almoptics.services.FinanceReportFetchService;
 import com.telkom.co.ke.almoptics.services.FinancialReportService;
 import com.telkom.co.ke.almoptics.services.ApprovalWorkflowService;
 import com.telkom.co.ke.almoptics.services.InventorySyncService;
 import com.telkom.co.ke.almoptics.services.WriteOffReportService;
+import com.telkom.co.ke.almoptics.services.AuditLogService;
+import com.telkom.co.ke.almoptics.services.UnmappedReportFetchService;
+import com.telkom.co.ke.almoptics.services.WriteOffReportFetchService;
+import com.telkom.co.ke.almoptics.schedulers.FinancialSyncScheduler;
 import org.apache.commons.csv.CSVParser;
 import org.apache.commons.csv.CSVRecord;
 
@@ -23,7 +30,8 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import java.io.StringWriter;
+
+import java.io.*;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.text.ParseException;
@@ -39,19 +47,19 @@ import org.springframework.data.domain.Sort;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.security.Principal;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.io.InputStreamReader;
 
 import org.springframework.data.jpa.domain.Specification;
 
 import javax.persistence.EntityManager;
 import javax.persistence.PersistenceContext;
 import javax.persistence.criteria.Predicate;
+import javax.servlet.http.HttpServletResponse;
 import java.util.ArrayList;
 import org.apache.poi.ss.usermodel.Row;
 import org.apache.poi.ss.usermodel.Sheet;
 import org.apache.poi.xssf.streaming.SXSSFWorkbook;
-import java.io.ByteArrayOutputStream;
 
 @RestController
 @RequestMapping("/api/financial")
@@ -95,8 +103,44 @@ public class FinancialReportController {
     @Autowired
     private InventorySyncService inventorySyncService;
 
+    @Autowired
+    private FinanceReportFetchService financeReportFetchService;
+
+    @Autowired
+    private UnmappedReportFetchService unmappedReportFetchService;
+
+    @Autowired
+    private WriteOffReportFetchService writeOffReportFetchService;
+
+    @Autowired(required = false)
+    private FinancialSyncScheduler financialSyncScheduler;
+
+    @Autowired(required = false)
+    private AuditLogService auditLogService;
+
+    /**
+     * The new bulk sync orchestrator. Used to auto-trigger the
+     * inventory↔FR sync (with set-based unmapped-add / unmapped-prune /
+     * decommission stages) right after a JSON FR upload succeeds.
+     */
+    @Autowired(required = false)
+    private com.telkom.co.ke.almoptics.services.SyncOrchestratorService syncOrchestratorService;
+
     @PersistenceContext
     private EntityManager entityManager;
+
+
+
+    private static final String[] BULK_TEMPLATE_HEADERS = new String[] {
+            "AssetName", "AssetSerialNumber", "TAG", "OracleAssetID", "AssetType",
+            "NodeType", "InstallationDate", "InitialCost", "SalvageValue",
+            "PONumber", "PODate", "FA_Category", "L1", "L2", "L3", "L4",
+            "AccumulatedDepreciationCode", "DepreciationCode", "UsefulLife_Months",
+            "VendorName", "VendorNumber", "ProjectNumber", "DateOfService",
+            "OldFA_Category", "CostCenter", "Adjustment", "TaskID",
+            "POLineNumber", "ItemBarCode", "RFID", "InvoiceNumber",
+            "Description"
+    };
 
     @GetMapping("/reports")
     public ResponseEntity<Map<String, Object>> getAllReports(
@@ -109,53 +153,82 @@ public class FinancialReportController {
         try {
             Sort sort = sortDir.equalsIgnoreCase("asc") ? Sort.by(sortBy).ascending() : Sort.by(sortBy).descending();
             Pageable pageable = PageRequest.of(page, size, sort);
-            Page<tb_FinancialReport> reportPage = search != null && !search.trim().isEmpty() ?
-                    financialReportService.findBySearchTerm(search, pageable) :
-                    financialReportService.findAll(pageable);
 
-            String lastMonthDate = getLastMonthDate(asAtDate);
+            if (asAtDate != null && !asAtDate.trim().isEmpty()) {
+                // Parse asAtDate to LocalDate and format to "d MMM yyyy"
+                LocalDate inputDate = LocalDate.parse(asAtDate);
+                String formattedDate = inputDate.format(DateTimeFormatter.ofPattern("d MMM yyyy"));
 
-            Map<String, Object> response = new HashMap<>();
-            response.put("reports", reportPage.getContent());
-            response.put("currentPage", reportPage.getNumber());
-            response.put("totalItems", reportPage.getTotalElements());
-            response.put("totalPages", reportPage.getTotalPages());
-            response.put("first", reportPage.isFirst());
-            response.put("last", reportPage.isLast());
-            response.put("size", reportPage.getSize());
-            response.put("sort", sortBy + "," + sortDir);
+                // Use calculateDepreciationForMonth for as-of-date reports
+                Map<String, Object> depResponse = financialReportService.calculateDepreciationForMonth(formattedDate, search, pageable);
 
-            // Calculate filtered values based on the paginated subset
-            List<tb_FinancialReport> reports = reportPage.getContent();
-            BigDecimal filteredCost = reports.stream()
-                    .map(tb_FinancialReport::getInitialCost)
-                    .filter(Objects::nonNull)
-                    .reduce(BigDecimal.ZERO, BigDecimal::add)
-                    .setScale(3, RoundingMode.HALF_UP);
-            BigDecimal filteredDepreciation = reports.stream()
-                    .map(tb_FinancialReport::getAccumulatedDepreciation)
-                    .filter(Objects::nonNull)
-                    .reduce(BigDecimal.ZERO, BigDecimal::add)
-                    .setScale(3, RoundingMode.HALF_UP);
-            BigDecimal filteredNBV = filteredCost.subtract(filteredDepreciation)
-                    .setScale(3, RoundingMode.HALF_UP);
+                // Override totalNBV to ensure consistency: totalCost - totalDepreciation
+                BigDecimal totalCost = (BigDecimal) depResponse.get("totalCost");
+                BigDecimal totalDepreciation = (BigDecimal) depResponse.get("totalDepreciation");
+                BigDecimal computedTotalNBV = totalCost.subtract(totalDepreciation).setScale(3, RoundingMode.HALF_UP);
+                depResponse.put("totalNBV", computedTotalNBV);
 
-            // Use database aggregates for total values
-            BigDecimal totalCost = financialReportService.getTotalCost() != null ?
-                    financialReportService.getTotalCost().setScale(3, RoundingMode.HALF_UP) : BigDecimal.ZERO.setScale(3, RoundingMode.HALF_UP);
-            BigDecimal totalNBV = financialReportService.getTotalNBV() != null ?
-                    financialReportService.getTotalNBV().setScale(3, RoundingMode.HALF_UP) : BigDecimal.ZERO.setScale(3, RoundingMode.HALF_UP);
-            BigDecimal totalDepreciation = financialReportService.getTotalDepreciation() != null ?
-                    financialReportService.getTotalDepreciation().setScale(3, RoundingMode.HALF_UP) : BigDecimal.ZERO.setScale(3, RoundingMode.HALF_UP);
+                // Adjust keys to match expected response (e.g., "reports" instead of "records")
+                Map<String, Object> response = new HashMap<>(depResponse);
+                response.put("reports", depResponse.get("records"));
+                response.remove("records"); // Remove original key if needed
 
-            response.put("totalCost", totalCost);
-            response.put("totalNBV", totalNBV);
-            response.put("totalDepreciation", totalDepreciation);
-            response.put("filteredCost", filteredCost);
-            response.put("filteredNBV", filteredNBV);
-            response.put("filteredDepreciation", filteredDepreciation);
+                // Add any missing keys or adjustments
+                response.put("sort", sortBy + "," + sortDir);
 
-            return new ResponseEntity<>(response, HttpStatus.OK);
+                return new ResponseEntity<>(response, HttpStatus.OK);
+            } else {
+                // Fallback to current (no asAtDate)
+                Page<tb_FinancialReport> reportPage = search != null && !search.trim().isEmpty() ?
+                        financialReportService.findBySearchTerm(search, pageable) :
+                        financialReportService.findAll(pageable);
+
+                String lastMonthDate = null; // No date filter for current
+
+                Map<String, Object> response = new HashMap<>();
+                response.put("reports", reportPage.getContent());
+                response.put("currentPage", reportPage.getNumber());
+                response.put("totalItems", reportPage.getTotalElements());
+                response.put("totalPages", reportPage.getTotalPages());
+                response.put("first", reportPage.isFirst());
+                response.put("last", reportPage.isLast());
+                response.put("size", reportPage.getSize());
+                response.put("sort", sortBy + "," + sortDir);
+
+                // Calculate filtered values based on the paginated subset
+                List<tb_FinancialReport> reports = reportPage.getContent();
+                BigDecimal filteredCost = reports.stream()
+                        .map(tb_FinancialReport::getInitialCost)
+                        .filter(Objects::nonNull)
+                        .reduce(BigDecimal.ZERO, BigDecimal::add)
+                        .setScale(3, RoundingMode.HALF_UP);
+                BigDecimal filteredDepreciation = reports.stream()
+                        .map(tb_FinancialReport::getAccumulatedDepreciation)
+                        .filter(Objects::nonNull)
+                        .reduce(BigDecimal.ZERO, BigDecimal::add)
+                        .setScale(3, RoundingMode.HALF_UP);
+                BigDecimal filteredNBV = filteredCost.subtract(filteredDepreciation)
+                        .setScale(3, RoundingMode.HALF_UP);
+
+                // Use filtered aggregates for total values (to match search)
+                BigDecimal totalCost = financialReportService.getFilteredCost(search, lastMonthDate) != null ?
+                        financialReportService.getFilteredCost(search, lastMonthDate).setScale(3, RoundingMode.HALF_UP) : BigDecimal.ZERO.setScale(3, RoundingMode.HALF_UP);
+                BigDecimal totalDepreciation = financialReportService.getFilteredDepreciation(search, lastMonthDate) != null ?
+                        financialReportService.getFilteredDepreciation(search, lastMonthDate).setScale(3, RoundingMode.HALF_UP) : BigDecimal.ZERO.setScale(3, RoundingMode.HALF_UP);
+
+                // Override totalNBV to ensure consistency: totalCost - totalDepreciation
+                BigDecimal computedTotalNBV = totalCost.subtract(totalDepreciation).setScale(3, RoundingMode.HALF_UP);
+
+                // Use the computed NBV instead of querying it
+                response.put("totalCost", totalCost);
+                response.put("totalNBV", computedTotalNBV);
+                response.put("totalDepreciation", totalDepreciation);
+                response.put("filteredCost", filteredCost);
+                response.put("filteredNBV", filteredNBV);
+                response.put("filteredDepreciation", filteredDepreciation);
+
+                return new ResponseEntity<>(response, HttpStatus.OK);
+            }
         } catch (Exception e) {
             logger.error("Error retrieving financial reports", e);
             return new ResponseEntity<>(Collections.singletonMap("message", "Error retrieving reports: " + e.getMessage()), HttpStatus.INTERNAL_SERVER_ERROR);
@@ -167,6 +240,7 @@ public class FinancialReportController {
         LocalDate inputDate = LocalDate.parse(asAtDate);
         return YearMonth.from(inputDate).minusMonths(1).atEndOfMonth().toString();
     }
+
 
     @DeleteMapping("/reports/{serialNumber}")
     public ResponseEntity<Map<String, Object>> deleteReport(
@@ -200,6 +274,184 @@ public class FinancialReportController {
         }
     }
 
+
+    @Transactional
+    @PostMapping("/updatechanges")
+    public ResponseEntity<Map<String, Object>> updateChanges(
+            @RequestBody List<tb_FinancialReport> reports,
+            Principal principal) {
+        Map<String, Object> response = new HashMap<>();
+        if (reports == null || reports.isEmpty()) {
+            response.put("message", "No data provided for update!");
+            response.put("status", "error");
+            return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
+        }
+
+        try {
+            String username = principal != null ? principal.getName() : "system";
+            Set<String> identifiersInRequest = new HashSet<>();
+            List<Integer> workflowIds = new ArrayList<>();
+            List<String> warnings = new ArrayList<>();
+            int recordsProcessed = 0;
+            int recordsUpdated = 0;
+            int recordsSkipped = 0;
+
+            // Validate all records upfront
+            for (int i = 0; i < reports.size(); i++) {
+                tb_FinancialReport report = reports.get(i);
+                int recordNumber = i + 1;
+                String identifier = report.getAssetSerialNumber() != null && !report.getAssetSerialNumber().isEmpty() ?
+                        report.getAssetSerialNumber() : report.getAssetName();
+
+                if (identifier == null || identifier.trim().isEmpty()) {
+                    response.put("message", "Record " + recordNumber + ": Invalid or missing identifier");
+                    response.put("status", "error");
+                    return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
+                }
+
+                if (!identifiersInRequest.add(identifier)) {
+                    response.put("message", "Record " + recordNumber + ": Duplicate identifier in update batch: " + identifier);
+                    response.put("status", "error");
+                    return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
+                }
+
+                // Validate mandatory fields: Asset Name and Oracle Asset ID
+                if (report.getAssetName() == null || report.getAssetName().trim().isEmpty()) {
+                    response.put("message", "Record " + recordNumber + ": Missing or invalid mandatory field: AssetName");
+                    response.put("status", "error");
+                    return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
+                }
+                if (report.getOracleAssetId() == null || report.getOracleAssetId().trim().isEmpty()) {
+                    response.put("message", "Record " + recordNumber + ": Missing or invalid mandatory field: OracleAssetId");
+                    response.put("status", "error");
+                    return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
+                }
+            }
+
+            // Process records
+            for (tb_FinancialReport report : reports) {
+                recordsProcessed++;
+                String identifier = report.getAssetSerialNumber() != null && !report.getAssetSerialNumber().isEmpty() ?
+                        report.getAssetSerialNumber() : report.getAssetName();
+                logger.info("Processing record {} with identifier: {}", recordsProcessed, identifier);
+
+                // Check for pending workflows
+                List<tb_ApprovalWorkflow> existingWorkflows = null;
+                try {
+                    existingWorkflows = approvalWorkflowService.findByAssetId(identifier);
+                } catch (Exception e) {
+                    logger.error("Error querying workflows for identifier: {}", identifier, e);
+                    warnings.add("Record " + recordsProcessed + ": Unable to check workflow status for identifier " + identifier + " due to server error");
+                    recordsSkipped++;
+                    continue;
+                }
+
+                boolean hasPendingWorkflow = existingWorkflows != null && existingWorkflows.stream()
+                        .anyMatch(w -> w.getUPDATED_STATUS() != null && w.getUPDATED_STATUS().toLowerCase().startsWith("pending"));
+
+                if (hasPendingWorkflow) {
+                    logger.info("Skipping record {} for identifier {} due to pending workflow", recordsProcessed, identifier);
+                    warnings.add("Record " + recordsProcessed + ": Identifier " + identifier +
+                            " has an existing workflow pending approval process and will be skipped.");
+                    recordsSkipped++;
+                    continue;
+                }
+
+                // Check if record exists in Financial Report
+                Optional<tb_FinancialReport> existingReportOpt;
+                try {
+                    existingReportOpt = financialReportService.findBySerialNumber(identifier)
+                            .or(() -> financialReportService.findByAssetName(identifier));
+                } catch (Exception e) {
+                    logger.error("Error querying financial report for identifier: {}", identifier, e);
+                    warnings.add("Record " + recordsProcessed + ": Unable to check financial report for identifier " + identifier + " due to server error");
+                    recordsSkipped++;
+                    continue;
+                }
+
+                if (!existingReportOpt.isPresent()) {
+                    warnings.add("Record " + recordsProcessed + ": Identifier " + identifier +
+                            " not found in financial reports. Update cannot be processed.");
+                    recordsSkipped++;
+                    continue;
+                }
+
+                tb_FinancialReport existingReport = existingReportOpt.get();
+
+                // Check if no changes
+                if (!hasChanges(existingReport, report)) {
+                    warnings.add("Record " + recordsProcessed + ": Asset " + identifier +
+                            " exists in Financial Report with no changes detected in AssetName or OracleAssetId.");
+                    recordsSkipped++;
+                    continue;
+                }
+
+                // Serialize original state
+                try {
+                    Map<String, Object> originalState = new HashMap<>();
+                    originalState.put("assetName", existingReport.getAssetName());
+                    originalState.put("OracleAssetId", existingReport.getOracleAssetId());
+                    existingReport.setOriginalState(objectMapper.writeValueAsString(originalState));
+                } catch (Exception e) {
+                    logger.error("Failed to serialize original state for identifier: {}", identifier, e);
+                    warnings.add("Record " + recordsProcessed + ": Failed to serialize original state for identifier: " + identifier);
+                    recordsSkipped++;
+                    continue;
+                }
+
+                // Update only AssetName and OracleAssetId
+                existingReport.setAssetName(report.getAssetName());
+                existingReport.setOracleAssetId(report.getOracleAssetId());
+                existingReport.setFinancialApprovalStatus("Pending L1 Approval");
+                existingReport.setChangedBy(username);
+                existingReport.setChangeDate(new Date());
+
+                tb_FinancialReport savedReport;
+                tb_ApprovalWorkflow workflow;
+                try {
+                    savedReport = financialReportService.save(existingReport);
+                    workflow = approvalWorkflowService.createApprovalWorkflow(savedReport, savedReport.getNodeType(), "pending modification", username);
+                } catch (Exception e) {
+                    logger.error("Error processing update for identifier: {}", identifier, e);
+                    warnings.add("Record " + recordsProcessed + ": Failed to process update for identifier " + identifier);
+                    recordsSkipped++;
+                    continue;
+                }
+
+                if (savedReport == null || workflow == null || workflow.getID() == null) {
+                    logger.error("Failed to process record {} for identifier: {}", recordsProcessed, identifier);
+                    warnings.add("Record " + recordsProcessed + ": Failed to create workflow for identifier " + identifier);
+                    recordsSkipped++;
+                    continue;
+                }
+
+                workflowIds.add(workflow.getID());
+                recordsUpdated++;
+            }
+
+            response.put("recordsProcessed", recordsProcessed);
+            response.put("recordsUpdated", recordsUpdated);
+            response.put("recordsSkipped", recordsSkipped);
+            response.put("workflowIds", workflowIds);
+            response.put("message", recordsUpdated > 0 ? "Successfully updated financial reports" : "No records updated");
+            response.put("status", recordsUpdated > 0 ? "success" : "success_with_warnings");
+
+            if (!warnings.isEmpty()) {
+                response.put("warnings", warnings);
+                response.put("status", "success_with_warnings");
+            }
+
+            logger.info("Update completed: processed={}, updated={}, skipped={}",
+                    recordsProcessed, recordsUpdated, recordsSkipped);
+            return new ResponseEntity<>(response, HttpStatus.OK);
+        } catch (Exception e) {
+            logger.error("Unexpected error processing updated financial reports", e);
+            response.put("message", "Update failed due to an unexpected error: " + e.getMessage());
+            response.put("status", "error");
+            response.put("errorDetails", e.getClass().getName() + ": " + e.getMessage());
+            return new ResponseEntity<>(response, HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
 
     @Transactional
     @PostMapping("/upload")
@@ -273,14 +525,16 @@ public class FinancialReportController {
                     if (fieldValue instanceof String) {
                         String value = (String) fieldValue;
                         if (value == null || value.trim().isEmpty()) {
-                            response.put("message", "Record " + recordNumber + ": Missing or invalid mandatory field: " + fieldName);
+//                            response.put("message", "Record " + recordNumber + ": Missing or invalid mandatory field: " + fieldName);
+                            response.put("message", "Record " + recordNumber + ": " + fieldName + " cannot be empty");
                             response.put("status", "error");
                             return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
                         }
                     }
                     // Integer field validation
                     else if (fieldName.equals("UsefulLifeMonths") && (fieldValue == null || (Integer) fieldValue <= 0)) {
-                        response.put("message", "Record " + recordNumber + ": Missing or invalid mandatory field: " + fieldName + " (must be a positive integer)");
+//                        response.put("message", "Record " + recordNumber + ": Missing or invalid mandatory field: " + fieldName + " (must be a positive integer)");
+                        response.put("message", "Record " + recordNumber + ": " + fieldName + " cannot be empty or zero, must be a positive integer");
                         response.put("status", "error");
                         return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
                     }
@@ -288,14 +542,16 @@ public class FinancialReportController {
                     else if (fieldValue instanceof BigDecimal) {
                         BigDecimal value = (BigDecimal) fieldValue;
                         if (value == null || value.compareTo(BigDecimal.ZERO) < 0) {
-                            response.put("message", "Record " + recordNumber + ": Missing or invalid mandatory field: " + fieldName + " (must be non-negative)");
+//                            response.put("message", "Record " + recordNumber + ": Missing or invalid mandatory field: " + fieldName + " (must be non-negative)");
+                            response.put("message", "Record " + recordNumber + ": " + fieldName + " cannot be empty, must be a non-negative value");
                             response.put("status", "error");
                             return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
                         }
                     }
                     // Handle any other unexpected null fields
                     else if (fieldValue == null) {
-                        response.put("message", "Record " + recordNumber + ": Missing or invalid mandatory field: " + fieldName);
+//                        response.put("message", "Record " + recordNumber + ": Missing or invalid mandatory field: " + fieldName);
+                        response.put("message", "Record " + recordNumber + ": " + fieldName + " cannot be empty");
                         response.put("status", "error");
                         return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
                     }
@@ -600,6 +856,13 @@ public class FinancialReportController {
 
             logger.info("Upload completed: processed={}, created={}, updated={}, skipped={}",
                     recordsProcessed, recordsCreated, recordsUpdated, recordsSkipped);
+
+            // Auto-trigger the inventory↔FR sync so the unmapped reports
+            // (and any decommission/recover deltas) reflect the new data
+            // without the user having to call /trigger-full-sync manually.
+            // Runs in the background so the upload response is not held up.
+            triggerPostUploadSync(principal, recordsCreated + recordsUpdated);
+
             return new ResponseEntity<>(response, HttpStatus.CREATED);
         } catch (Exception e) {
             logger.error("Unexpected error processing uploaded financial reports", e);
@@ -661,15 +924,6 @@ public class FinancialReportController {
 
 
 
-    /**
-     * Import write-off reports from a CSV file.
-     *
-     * @param file          The CSV file containing write-off data.
-     * @param separator     The character used to separate values in the CSV file.
-     * @param ignoreHeader  Whether to ignore the header row in the CSV file.
-     * @param principal     The authenticated user making the request.
-     * @return A response entity containing the result of the import operation.
-     */
 
     @PostMapping("/import-writeoff")
     @Transactional
@@ -1213,16 +1467,7 @@ public class FinancialReportController {
         return ResponseEntity.ok(response);
     }
 
-    /**
-     * Search for financial reports by asset name or serial number.
-     *
-     * @param query   The search query (asset name or serial number).
-     * @param page    The page number for pagination.
-     * @param size    The number of records per page.
-     * @param sortBy  The field to sort by.
-     * @param sortDir The direction of sorting (asc or desc).
-     * @return A response entity containing the search results.
-     */
+
 
     @GetMapping("/reports/search")
     public ResponseEntity<Map<String, Object>> searchByAssetNameOrSerial(
@@ -1304,6 +1549,10 @@ public class FinancialReportController {
                 if (filters.containsKey("poNumber") && !filters.get("poNumber").isEmpty()) {
                     predicates.add(cb.equal(root.get("poNumber"), filters.get("poNumber")));
                 }
+                if (filters.containsKey("OracleAssetID") && !filters.get("OracleAssetID").isEmpty()) {
+                    predicates.add(cb.equal(root.get("OracleAssetID"), filters.get("OracleAssetID")));
+                }
+
 
                 // New date range filters
                 try {
@@ -1341,6 +1590,45 @@ public class FinancialReportController {
             response.put("last", reportPage.isLast());
             response.put("size", reportPage.getSize());
             response.put("sort", sortBy + "," + sortDir);
+
+            // QA bug: previously the filter endpoint returned no totals so the Summary
+            // tab on the UI showed Total Cost / NBV / Depreciation as 0 whenever any
+            // filter was applied. We now aggregate using the SAME Specification so the
+            // totals reflect the entire filtered result set, not just the current page.
+            List<tb_FinancialReport> allFiltered = financialReportRepo.findAll(spec);
+            BigDecimal totalCost = allFiltered.stream()
+                    .map(tb_FinancialReport::getInitialCost)
+                    .filter(Objects::nonNull)
+                    .reduce(BigDecimal.ZERO, BigDecimal::add)
+                    .setScale(3, RoundingMode.HALF_UP);
+            BigDecimal totalDepreciation = allFiltered.stream()
+                    .map(tb_FinancialReport::getAccumulatedDepreciation)
+                    .filter(Objects::nonNull)
+                    .reduce(BigDecimal.ZERO, BigDecimal::add)
+                    .setScale(3, RoundingMode.HALF_UP);
+            BigDecimal totalNBV = totalCost.subtract(totalDepreciation).setScale(3, RoundingMode.HALF_UP);
+
+            // Per-page (visible rows) aggregates – kept for the "filtered" sub-row
+            // shown next to the totals on the UI.
+            List<tb_FinancialReport> pageReports = reportPage.getContent();
+            BigDecimal filteredCost = pageReports.stream()
+                    .map(tb_FinancialReport::getInitialCost)
+                    .filter(Objects::nonNull)
+                    .reduce(BigDecimal.ZERO, BigDecimal::add)
+                    .setScale(3, RoundingMode.HALF_UP);
+            BigDecimal filteredDepreciation = pageReports.stream()
+                    .map(tb_FinancialReport::getAccumulatedDepreciation)
+                    .filter(Objects::nonNull)
+                    .reduce(BigDecimal.ZERO, BigDecimal::add)
+                    .setScale(3, RoundingMode.HALF_UP);
+            BigDecimal filteredNBV = filteredCost.subtract(filteredDepreciation).setScale(3, RoundingMode.HALF_UP);
+
+            response.put("totalCost", totalCost);
+            response.put("totalNBV", totalNBV);
+            response.put("totalDepreciation", totalDepreciation);
+            response.put("filteredCost", filteredCost);
+            response.put("filteredNBV", filteredNBV);
+            response.put("filteredDepreciation", filteredDepreciation);
 
             return new ResponseEntity<>(response, HttpStatus.OK);
         } catch (Exception e) {
@@ -1477,6 +1765,43 @@ public class FinancialReportController {
         return clone;
     }
 
+    @GetMapping("/monthly-report-V2")
+    public ResponseEntity<Map<String, Object>> getMonthlyFinancialReportV2(
+            @RequestParam String date,
+            @RequestParam(defaultValue = "") String search,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "100") int size) {
+        try {
+            Sort sort = Sort.by("id").ascending();
+            Pageable pageable = PageRequest.of(page, size, sort);
+
+            Map<String, Object> calculations = financialReportService.calculateDepreciationForMonthV2(date, search, pageable);
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("filteredCost", calculations.get("filteredCost").toString());
+            response.put("filteredDepreciation", calculations.get("filteredDepreciation").toString());
+            response.put("filteredMonthlyDepreciation", calculations.get("filteredMonthlyDepreciation").toString());
+            response.put("filteredNBV", calculations.get("filteredNBV").toString());
+            response.put("totalCost", calculations.get("totalCost").toString());
+            response.put("totalDepreciation", calculations.get("totalDepreciation").toString());
+            response.put("totalMonthlyDepreciation", calculations.get("totalMonthlyDepreciation").toString());
+            response.put("totalNBV", calculations.get("totalNBV").toString());
+            response.put("currentPage", calculations.get("currentPage"));
+            response.put("totalPages", calculations.get("totalPages"));
+            response.put("totalItems", calculations.get("totalItems"));
+            response.put("first", calculations.get("first"));
+            response.put("last", calculations.get("last"));
+            response.put("size", calculations.get("size"));
+            response.put("sort", calculations.get("sort"));
+            response.put("records", calculations.get("records"));
+
+            logger.info("Monthly financial report generated for {} at {}", date, new SimpleDateFormat("hh:mm a zzz").format(new Date()));
+            return new ResponseEntity<>(response, HttpStatus.OK);
+        } catch (Exception e) {
+            logger.error("Error generating monthly financial report", e);
+            return new ResponseEntity<>(Collections.singletonMap("message", "Error: " + e.getMessage()), HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
     @GetMapping("/monthly-report")
     public ResponseEntity<Map<String, Object>> getMonthlyFinancialReport(
             @RequestParam String date, // e.g., "24 Jul 2025"
@@ -1512,6 +1837,7 @@ public class FinancialReportController {
             return new ResponseEntity<>(Collections.singletonMap("message", "Error: " + e.getMessage()), HttpStatus.INTERNAL_SERVER_ERROR);
         }
     }
+
     @PostMapping("/export")
     public ResponseEntity<byte[]> exportFinancialReports(@RequestBody Map<String, Object> body) {
         try {
@@ -1622,6 +1948,7 @@ public class FinancialReportController {
         SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd");
 
         for (tb_FinancialReport report : reports) {
+            // Removed dateFormat.format() and just use the value (cast to String if needed)
             csvPrinter.printRecord(
                     report.getAssetName(),
                     report.getAssetSerialNumber(),
@@ -1629,11 +1956,11 @@ public class FinancialReportController {
                     report.getOracleAssetId(),
                     report.getAssetType(),
                     report.getNodeType(),
-                    report.getInstallationDate() != null ? dateFormat.format(report.getInstallationDate()) : "",
+                    report.getInstallationDate() != null ? report.getInstallationDate() : "",  // Changed
                     report.getInitialCost(),
                     report.getSalvageValue(),
                     report.getPoNumber(),
-                    report.getPoDate() != null ? dateFormat.format(report.getPoDate()) : "",
+                    report.getPoDate() != null ? report.getPoDate() : "",  // Changed
                     report.getFaCategory(),
                     report.getL1(),
                     report.getL2(),
@@ -1645,7 +1972,7 @@ public class FinancialReportController {
                     report.getVendorName(),
                     report.getVendorNumber(),
                     report.getProjectNumber(),
-                    report.getDateOfService() != null ? dateFormat.format(report.getDateOfService()) : "",
+                    report.getDateOfService() != null ? report.getDateOfService() : "",  // Changed
                     report.getOldFarCategory(),
                     report.getCostCenterData(),
                     report.getAdjustment(),
@@ -1700,11 +2027,11 @@ public class FinancialReportController {
                 dataRow.createCell(cellNum++).setCellValue(report.getOracleAssetId());
                 dataRow.createCell(cellNum++).setCellValue(report.getAssetType());
                 dataRow.createCell(cellNum++).setCellValue(report.getNodeType());
-                dataRow.createCell(cellNum++).setCellValue(report.getInstallationDate() != null ? dateFormat.format(report.getInstallationDate()) : "");
+                dataRow.createCell(cellNum++).setCellValue(report.getInstallationDate() != null ? report.getInstallationDate() : "");  // Changed
                 dataRow.createCell(cellNum++).setCellValue(report.getInitialCost() != null ? report.getInitialCost().doubleValue() : 0);
                 dataRow.createCell(cellNum++).setCellValue(report.getSalvageValue() != null ? report.getSalvageValue().doubleValue() : 0);
                 dataRow.createCell(cellNum++).setCellValue(report.getPoNumber());
-                dataRow.createCell(cellNum++).setCellValue(report.getPoDate() != null ? dateFormat.format(report.getPoDate()) : "");
+                dataRow.createCell(cellNum++).setCellValue(report.getPoDate() != null ? report.getPoDate() : "");  // Changed
                 dataRow.createCell(cellNum++).setCellValue(report.getFaCategory());
                 dataRow.createCell(cellNum++).setCellValue(report.getL1());
                 dataRow.createCell(cellNum++).setCellValue(report.getL2());
@@ -1716,7 +2043,7 @@ public class FinancialReportController {
                 dataRow.createCell(cellNum++).setCellValue(report.getVendorName());
                 dataRow.createCell(cellNum++).setCellValue(report.getVendorNumber());
                 dataRow.createCell(cellNum++).setCellValue(report.getProjectNumber());
-                dataRow.createCell(cellNum++).setCellValue(report.getDateOfService() != null ? dateFormat.format(report.getDateOfService()) : "");
+                dataRow.createCell(cellNum++).setCellValue(report.getDateOfService() != null ? report.getDateOfService() : "");  // Changed
                 dataRow.createCell(cellNum++).setCellValue(report.getOldFarCategory());
                 dataRow.createCell(cellNum++).setCellValue(report.getCostCenterData());
                 dataRow.createCell(cellNum++).setCellValue(report.getAdjustment() != null ? report.getAdjustment().doubleValue() : 0);
@@ -1739,4 +2066,465 @@ public class FinancialReportController {
             throw e;
         }
     }
+
+
+
+    @PostMapping("/reports/single")
+    @Transactional
+    public ResponseEntity<Map<String, Object>> createSingleReport(
+            @RequestBody tb_FinancialReport report,
+            Principal principal) {
+        if (report == null) {
+            return new ResponseEntity<>(
+                    Collections.singletonMap("message", "No record provided"),
+                    HttpStatus.BAD_REQUEST);
+        }
+        return uploadFinancialReports(Collections.singletonList(report), principal);
+    }
+
+
+    @PostMapping("/reports/single-edit/{identifier}")
+    @Transactional
+    public ResponseEntity<?> singleEditReport(
+            @PathVariable String identifier,
+            @RequestBody tb_FinancialReport updatedReport,
+            Principal principal) {
+        ResponseEntity<?> response = modifyReport(identifier, updatedReport);
+        if (auditLogService != null && response.getStatusCode().is2xxSuccessful()) {
+            try {
+                String username = principal != null ? principal.getName()
+                        : (updatedReport.getChangedBy() != null ? updatedReport.getChangedBy() : "system");
+                auditLogService.logAction(
+                        "FinancialReport",
+                        "SINGLE_EDIT",
+                        username,
+                        "Edited FR record with identifier: " + identifier);
+            } catch (Exception ignore) {
+                logger.warn("Failed to write audit log for single edit on {}", identifier);
+            }
+        }
+        return response;
+    }
+
+    // ----- helpers -----
+
+
+    private void triggerPostUploadSync(Principal principal, int affectedRows) {
+        if (affectedRows <= 0) return; // nothing changed → nothing to sync
+        String user = principal != null ? principal.getName() : "system";
+        Thread t = new Thread(() -> {
+            try {
+                if (syncOrchestratorService != null) {
+                    logger.info("Auto-triggering SyncOrchestrator after FR upload by {} ({} rows affected)",
+                            user, affectedRows);
+                    com.telkom.co.ke.almoptics.services.SyncOrchestratorService.RunSummary summary =
+                            syncOrchestratorService.runFullCycle("post-upload:" + user);
+                    logger.info("Post-upload sync result: {}",
+                            summary == null ? "skipped" : summary.toShortString());
+                    if (auditLogService != null) {
+                        // tb_AuditLog.details is VARCHAR(255) — keep the
+                        // message short so the insert never trips the
+                        // "Data too long for column 'details'" error.
+                        String details = "FR upload of " + affectedRows
+                                + " rows triggered orchestrator sync. "
+                                + (summary == null ? "" : summary.toShortString());
+                        if (details.length() > 240) {
+                            details = details.substring(0, 239) + "…";
+                        }
+                        auditLogService.logAction(
+                                "FinancialReport", "AUTO_SYNC_AFTER_UPLOAD", user, details);
+                    }
+                } else if (financialSyncScheduler != null) {
+                    logger.info("Auto-triggering legacy FinancialSyncScheduler after FR upload by {}", user);
+                    String summary = financialSyncScheduler.triggerManualSync();
+                    logger.info("Post-upload legacy sync result: {}", summary);
+                } else {
+                    logger.debug("No sync orchestrator wired — skipping post-upload sync");
+                }
+            } catch (Exception e) {
+                logger.error("Post-upload sync failed: {}", e.getMessage(), e);
+            }
+        }, "fr-post-upload-sync");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    @PostMapping("/fetch-financereport")
+    public ResponseEntity<?> fetchFinancialReports(
+            @RequestBody ApprovalRequest request,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "100") int size,
+            @RequestParam(defaultValue = "id") String sortBy,
+            @RequestParam(defaultValue = "asc") String sortDir,
+            HttpServletResponse response) throws Exception {
+
+        try {
+            // Merge query params into request
+            if (request.getPage() == null) request.setPage(page);
+            if (request.getSize() == null || request.getSize() <= 0) request.setSize(size);
+
+            // ====================== EXPORT HANDLING ======================
+            if (Boolean.TRUE.equals(request.isExportAll()) && request.getFormat() != null) {
+
+                String format = request.getFormat().toLowerCase().trim();
+
+                if ("csv".equals(format)) {
+                    // CSV Export
+                    response.setContentType("text/csv");
+                    response.setCharacterEncoding("UTF-8");
+                    response.setHeader(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename=\"financial_reports_" +
+                                    new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date()) + ".csv\"");
+
+                    try (PrintWriter writer = response.getWriter()) {
+                        financeReportFetchService.streamExportToCsv(request, writer);
+                    }
+                    return null; // Response already written directly
+
+                } else if ("xlsx".equals(format) || "excel".equals(format)) {
+                    // Excel Export
+                    response.setContentType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+                    response.setHeader(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename=\"financial_reports_" +
+                                    new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date()) + ".xlsx\"");
+
+                    try (OutputStream out = response.getOutputStream()) {
+                        financeReportFetchService.streamExportToExcel(request, out);
+                    }
+                    return null; // Response already written
+                }
+            }
+
+            // ====================== NORMAL PAGINATED FETCH ======================
+            // If not exporting, return JSON with pagination + totals
+
+            PageResult<Map<String, Object>> pageResult = financeReportFetchService.multiFilterSearch(request);
+
+            Map<String, BigDecimal> grandTotals = financeReportFetchService.getAggregateTotals(request);
+            Map<String, BigDecimal> pageAggregates = financeReportFetchService.calculatePageAggregates(
+                    pageResult.getdata());
+
+            Map<String, Object> result = new HashMap<>();
+
+            result.put("reports", pageResult.getdata());
+            result.put("currentPage", pageResult.getPage());
+            result.put("totalItems", pageResult.getTotalElements());
+            result.put("totalPages", pageResult.getTotalPages());
+            result.put("first", pageResult.getPage() == 0);
+            result.put("last", pageResult.getPage() >= pageResult.getTotalPages() - 1);
+            result.put("size", pageResult.getSize());
+            result.put("sort", sortBy + "," + sortDir);
+
+            // Grand totals (full filtered set)
+            result.put("totalCost", grandTotals.get("totalCost"));
+            result.put("totalDepreciation", grandTotals.get("totalDepreciation"));
+            result.put("totalNBV", grandTotals.get("totalNBV"));
+
+            // Current page aggregates
+            result.put("filteredCost", pageAggregates.get("filteredCost"));
+            result.put("filteredDepreciation", pageAggregates.get("filteredDepreciation"));
+            result.put("filteredNBV", pageAggregates.get("filteredNBV"));
+
+            return new ResponseEntity<>(result, HttpStatus.OK);
+
+        } catch (Exception e) {
+            logger.error("Error in /fetch-financereport", e);
+            return new ResponseEntity<>(
+                    Collections.singletonMap("message", "Error: " + e.getMessage()),
+                    HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    // =====================================================================
+    // UNMAPPED ACTIVE INVENTORY ENDPOINTS
+    // =====================================================================
+
+    @PostMapping("/fetch-unmappedactive")
+    public ResponseEntity<?> fetchUnmappedActive(
+            @RequestBody ApprovalRequest request,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "100") int size,
+            @RequestParam(defaultValue = "id") String sortBy,
+            @RequestParam(defaultValue = "asc") String sortDir,
+            HttpServletResponse response) throws Exception {
+
+        try {
+            // Merge query params into request
+            if (request.getPage() == null) request.setPage(page);
+            if (request.getSize() == null || request.getSize() <= 0) request.setSize(size);
+
+            // ====================== EXPORT HANDLING ======================
+            if (Boolean.TRUE.equals(request.isExportAll()) && request.getFormat() != null) {
+
+                String format = request.getFormat().toLowerCase().trim();
+
+                if ("csv".equals(format)) {
+                    // CSV Export
+                    response.setContentType("text/csv");
+                    response.setCharacterEncoding("UTF-8");
+                    response.setHeader(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename=\"unmapped_active_" +
+                                    new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date()) + ".csv\"");
+
+                    try (PrintWriter writer = response.getWriter()) {
+                        unmappedReportFetchService.streamUnmappedActiveToCsv(request, writer);
+                    }
+                    return null; // Response already written directly
+
+                } else if ("xlsx".equals(format) || "excel".equals(format)) {
+                    // Excel Export
+                    response.setContentType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+                    response.setHeader(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename=\"unmapped_active_" +
+                                    new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date()) + ".xlsx\"");
+
+                    try (OutputStream out = response.getOutputStream()) {
+                        unmappedReportFetchService.streamUnmappedActiveToExcel(request, out);
+                    }
+                    return null; // Response already written
+                }
+            }
+
+            // ====================== NORMAL PAGINATED FETCH ======================
+            PageResult<Map<String, Object>> pageResult = unmappedReportFetchService.searchUnmappedActive(request);
+
+            Map<String, Object> result = new HashMap<>();
+            result.put("reports", pageResult.getdata());
+            result.put("currentPage", pageResult.getPage());
+            result.put("totalItems", pageResult.getTotalElements());
+            result.put("totalPages", pageResult.getTotalPages());
+            result.put("first", pageResult.getPage() == 0);
+            result.put("last", pageResult.getPage() >= pageResult.getTotalPages() - 1);
+            result.put("size", pageResult.getSize());
+            result.put("sort", sortBy + "," + sortDir);
+
+            return new ResponseEntity<>(result, HttpStatus.OK);
+
+        } catch (Exception e) {
+            logger.error("Error in /fetch-unmappedactive", e);
+            return new ResponseEntity<>(
+                    Collections.singletonMap("message", "Error: " + e.getMessage()),
+                    HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    // =====================================================================
+    // UNMAPPED PASSIVE INVENTORY ENDPOINTS
+    // =====================================================================
+
+    @PostMapping("/fetch-unmappedpassive")
+    public ResponseEntity<?> fetchUnmappedPassive(
+            @RequestBody ApprovalRequest request,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "100") int size,
+            @RequestParam(defaultValue = "ID") String sortBy,
+            @RequestParam(defaultValue = "asc") String sortDir,
+            HttpServletResponse response) throws Exception {
+
+        try {
+            // Merge query params into request
+            if (request.getPage() == null) request.setPage(page);
+            if (request.getSize() == null || request.getSize() <= 0) request.setSize(size);
+
+            // ====================== EXPORT HANDLING ======================
+            if (Boolean.TRUE.equals(request.isExportAll()) && request.getFormat() != null) {
+
+                String format = request.getFormat().toLowerCase().trim();
+
+                if ("csv".equals(format)) {
+                    // CSV Export
+                    response.setContentType("text/csv");
+                    response.setCharacterEncoding("UTF-8");
+                    response.setHeader(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename=\"unmapped_passive_" +
+                                    new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date()) + ".csv\"");
+
+                    try (PrintWriter writer = response.getWriter()) {
+                        unmappedReportFetchService.streamUnmappedPassiveToCsv(request, writer);
+                    }
+                    return null; // Response already written directly
+
+                } else if ("xlsx".equals(format) || "excel".equals(format)) {
+                    // Excel Export
+                    response.setContentType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+                    response.setHeader(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename=\"unmapped_passive_" +
+                                    new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date()) + ".xlsx\"");
+
+                    try (OutputStream out = response.getOutputStream()) {
+                        unmappedReportFetchService.streamUnmappedPassiveToExcel(request, out);
+                    }
+                    return null; // Response already written
+                }
+            }
+
+            // ====================== NORMAL PAGINATED FETCH ======================
+            PageResult<Map<String, Object>> pageResult = unmappedReportFetchService.searchUnmappedPassive(request);
+
+            Map<String, Object> result = new HashMap<>();
+            result.put("reports", pageResult.getdata());
+            result.put("currentPage", pageResult.getPage());
+            result.put("totalItems", pageResult.getTotalElements());
+            result.put("totalPages", pageResult.getTotalPages());
+            result.put("first", pageResult.getPage() == 0);
+            result.put("last", pageResult.getPage() >= pageResult.getTotalPages() - 1);
+            result.put("size", pageResult.getSize());
+            result.put("sort", sortBy + "," + sortDir);
+
+            return new ResponseEntity<>(result, HttpStatus.OK);
+
+        } catch (Exception e) {
+            logger.error("Error in /fetch-unmappedpassive", e);
+            return new ResponseEntity<>(
+                    Collections.singletonMap("message", "Error: " + e.getMessage()),
+                    HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    // =====================================================================
+    // UNMAPPED IT INVENTORY ENDPOINTS
+    // =====================================================================
+
+    @PostMapping("/fetch-unmappedit")
+    public ResponseEntity<?> fetchUnmappedIT(
+            @RequestBody ApprovalRequest request,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "100") int size,
+            @RequestParam(defaultValue = "ID") String sortBy,
+            @RequestParam(defaultValue = "asc") String sortDir,
+            HttpServletResponse response) throws Exception {
+
+        try {
+            // Merge query params into request
+            if (request.getPage() == null) request.setPage(page);
+            if (request.getSize() == null || request.getSize() <= 0) request.setSize(size);
+
+            // ====================== EXPORT HANDLING ======================
+            if (Boolean.TRUE.equals(request.isExportAll()) && request.getFormat() != null) {
+
+                String format = request.getFormat().toLowerCase().trim();
+
+                if ("csv".equals(format)) {
+                    // CSV Export
+                    response.setContentType("text/csv");
+                    response.setCharacterEncoding("UTF-8");
+                    response.setHeader(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename=\"unmapped_it_" +
+                                    new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date()) + ".csv\"");
+
+                    try (PrintWriter writer = response.getWriter()) {
+                        unmappedReportFetchService.streamUnmappedITToCsv(request, writer);
+                    }
+                    return null; // Response already written directly
+
+                } else if ("xlsx".equals(format) || "excel".equals(format)) {
+                    // Excel Export
+                    response.setContentType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+                    response.setHeader(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename=\"unmapped_it_" +
+                                    new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date()) + ".xlsx\"");
+
+                    try (OutputStream out = response.getOutputStream()) {
+                        unmappedReportFetchService.streamUnmappedITToExcel(request, out);
+                    }
+                    return null; // Response already written
+                }
+            }
+
+            // ====================== NORMAL PAGINATED FETCH ======================
+            PageResult<Map<String, Object>> pageResult = unmappedReportFetchService.searchUnmappedIT(request);
+
+            Map<String, Object> result = new HashMap<>();
+            result.put("reports", pageResult.getdata());
+            result.put("currentPage", pageResult.getPage());
+            result.put("totalItems", pageResult.getTotalElements());
+            result.put("totalPages", pageResult.getTotalPages());
+            result.put("first", pageResult.getPage() == 0);
+            result.put("last", pageResult.getPage() >= pageResult.getTotalPages() - 1);
+            result.put("size", pageResult.getSize());
+            result.put("sort", sortBy + "," + sortDir);
+
+            return new ResponseEntity<>(result, HttpStatus.OK);
+
+        } catch (Exception e) {
+            logger.error("Error in /fetch-unmappedit", e);
+            return new ResponseEntity<>(
+                    Collections.singletonMap("message", "Error: " + e.getMessage()),
+                    HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    // =====================================================================
+    // WRITE-OFF REPORT ENDPOINTS
+    // =====================================================================
+
+    @PostMapping("/fetch-writeoff")
+    public ResponseEntity<?> fetchWriteOff(
+            @RequestBody ApprovalRequest request,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "100") int size,
+            @RequestParam(defaultValue = "id") String sortBy,
+            @RequestParam(defaultValue = "asc") String sortDir,
+            HttpServletResponse response) throws Exception {
+
+        try {
+            // Merge query params into request
+            if (request.getPage() == null) request.setPage(page);
+            if (request.getSize() == null || request.getSize() <= 0) request.setSize(size);
+
+            // ====================== EXPORT HANDLING ======================
+            if (Boolean.TRUE.equals(request.isExportAll()) && request.getFormat() != null) {
+
+                String format = request.getFormat().toLowerCase().trim();
+
+                if ("csv".equals(format)) {
+                    // CSV Export
+                    response.setContentType("text/csv");
+                    response.setCharacterEncoding("UTF-8");
+                    response.setHeader(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename=\"writeoff_report_" +
+                                    new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date()) + ".csv\"");
+
+                    try (PrintWriter writer = response.getWriter()) {
+                        writeOffReportFetchService.streamWriteOffToCsv(request, writer);
+                    }
+                    return null; // Response already written directly
+
+                } else if ("xlsx".equals(format) || "excel".equals(format)) {
+                    // Excel Export
+                    response.setContentType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+                    response.setHeader(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename=\"writeoff_report_" +
+                                    new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date()) + ".xlsx\"");
+
+                    try (OutputStream out = response.getOutputStream()) {
+                        writeOffReportFetchService.streamWriteOffToExcel(request, out);
+                    }
+                    return null; // Response already written
+                }
+            }
+
+            // ====================== NORMAL PAGINATED FETCH ======================
+            PageResult<Map<String, Object>> pageResult = writeOffReportFetchService.searchWriteOff(request);
+
+            Map<String, Object> result = new HashMap<>();
+            result.put("reports", pageResult.getdata());
+            result.put("currentPage", pageResult.getPage());
+            result.put("totalItems", pageResult.getTotalElements());
+            result.put("totalPages", pageResult.getTotalPages());
+            result.put("first", pageResult.getPage() == 0);
+            result.put("last", pageResult.getPage() >= pageResult.getTotalPages() - 1);
+            result.put("size", pageResult.getSize());
+            result.put("sort", sortBy + "," + sortDir);
+
+            return new ResponseEntity<>(result, HttpStatus.OK);
+
+        } catch (Exception e) {
+            logger.error("Error in /fetch-writeoff", e);
+            return new ResponseEntity<>(
+                    Collections.singletonMap("message", "Error: " + e.getMessage()),
+                    HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
 }

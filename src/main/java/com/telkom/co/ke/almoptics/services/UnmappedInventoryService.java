@@ -49,6 +49,10 @@ public class UnmappedInventoryService {
     private static final AtomicLong nullSerialWarningCount = new AtomicLong(0);
     private static final long WARNING_LOG_THRESHOLD = 100; // Log every 100th warning
 
+    /** Disabled by default once SyncOrchestratorService is in. */
+    @org.springframework.beans.factory.annotation.Value("${sync.legacy.cron.enabled:false}")
+    private boolean legacyCronEnabled;
+
     @Autowired
     private ActiveInventoryRepository activeInventoryRepository;
 
@@ -679,6 +683,11 @@ public class UnmappedInventoryService {
      */
     @Scheduled(fixedRate = 3600000) // Run every hour
     public void scheduleUnmappedInventoryCheck() {
+        if (!legacyCronEnabled) {
+            logger.debug("Legacy hourly unmapped-inventory check disabled. " +
+                    "SyncOrchestratorService performs the unmapped delta sync in bulk.");
+            return;
+        }
         logger.info("Starting scheduled unmapped inventory check...");
         retryOperation(() -> {
             // Check for unmapped active inventory

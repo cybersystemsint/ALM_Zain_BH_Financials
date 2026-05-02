@@ -1,5 +1,8 @@
 package com.telkom.co.ke.almoptics.controllers;
 
+import com.telkom.co.ke.almoptics.dto.ErrorResponse;
+import com.telkom.co.ke.almoptics.dto.PageResult;
+import com.telkom.co.ke.almoptics.dto.ApprovalRequest;
 import com.telkom.co.ke.almoptics.entities.tb_ApprovalWorkflow;
 import com.telkom.co.ke.almoptics.entities.tb_FinancialReport;
 import com.telkom.co.ke.almoptics.services.ApprovalWorkflowService;
@@ -11,11 +14,15 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import javax.servlet.http.HttpServletResponse;
 import java.text.SimpleDateFormat;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -216,6 +223,189 @@ public class FinanceApprovals {
         } catch (Exception e) {
             logger.error("Error searching finance approvals", e);
             return new ResponseEntity<>(Map.of("message", "Error searching approvals: " + e.getMessage()), HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    @PostMapping("/fetch-approvals")
+    public ResponseEntity<?> fetchFinanceApprovals(
+            @RequestBody com.telkom.co.ke.almoptics.dto.ApprovalRequest request,
+            HttpServletResponse response) throws Exception {
+
+        // ENHANCEMENT: Map dateFrom/dateTo to startDate/endDate for service layer
+        // Support both naming conventions: dateFrom/dateTo (API) → startDate/endDate (service)
+        if ((request.getStartDate() == null || request.getStartDate().trim().isEmpty()) &&
+            (request.getDateFrom() != null && !request.getDateFrom().trim().isEmpty())) {
+            request.setStartDate(request.getDateFrom());
+        }
+        if ((request.getEndDate() == null || request.getEndDate().trim().isEmpty()) &&
+            (request.getDateTo() != null && !request.getDateTo().trim().isEmpty())) {
+            request.setEndDate(request.getDateTo());
+        }
+
+        // Set defaults if still not provided
+        if (request.getStartDate() == null || request.getStartDate().trim().isEmpty()) {
+            // Default to one year ago for relevant recent data
+            String oneYearAgo = LocalDate.now().minusYears(1).format(DateTimeFormatter.ISO_DATE);
+            request.setStartDate(oneYearAgo);
+        }
+        if (request.getEndDate() == null || request.getEndDate().trim().isEmpty()) {
+            // Use current date dynamically instead of hardcoding
+            String currentDate = LocalDate.now().format(DateTimeFormatter.ISO_DATE);
+            request.setEndDate(currentDate);
+        }
+        logger.info("Date range set: startDate={}, endDate={}", request.getStartDate(), request.getEndDate());
+
+        // Determine if this is an export request
+        boolean isExport = request.getFormat() != null &&
+                (request.getFormat().equalsIgnoreCase("csv") || request.getFormat().equalsIgnoreCase("xlsx"));
+
+        logger.info("Finance Approvals fetch started. Export: {}, ExportAll: {}, Filters: {}, DateRange: {} to {}",
+                isExport, request.isExportAll(),
+                request.getFilters() != null ? request.getFilters().size() : 0,
+                request.getStartDate(), request.getEndDate());
+
+        long start = System.currentTimeMillis();
+
+        try {
+            if (isExport) {
+                // ====================== EXPORT HANDLING ======================
+                String fmt = request.getFormat().toLowerCase();
+                String filename = "finance_approvals." + fmt;
+
+                // Set response headers for download
+                response.setHeader(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"");
+                response.setHeader("X-Accel-Buffering", "no");
+                response.setHeader("Cache-Control", "no-cache");
+
+                if ("xlsx".equals(fmt)) {
+                    response.setContentType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+                    approvalWorkflowService.streamExportToExcel(request, response.getOutputStream());
+                } else {
+                    response.setContentType("text/csv; charset=UTF-8");
+                    response.setCharacterEncoding("UTF-8");
+                    approvalWorkflowService.streamExportToCsv(request, response.getWriter());
+                }
+
+                logger.info("Finance Approvals export completed. Format: {}, Duration: {} ms",
+                        fmt, System.currentTimeMillis() - start);
+
+                return null; // Streaming response - no body
+
+            } else {
+                // ====================== NORMAL PAGINATED SEARCH ======================
+                PageResult<Map<String, Object>> results = approvalWorkflowService.multiFilterSearch(request);
+
+                logger.info("Finance Approvals search completed. Duration: {} ms, Total Elements: {}",
+                        System.currentTimeMillis() - start, results.getTotalElements());
+
+                return ResponseEntity.ok(results);
+            }
+
+        } catch (Exception ex) {
+            long duration = System.currentTimeMillis() - start;
+            logger.error("Finance approvals fetch failed after {} ms", duration, ex);
+
+            // For export requests, we cannot send JSON anymore because headers are already sent
+            if (isExport) {
+                try {
+                    response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+                } catch (Exception ignored) {}
+                return null;
+            }
+
+            // For normal requests, return error JSON
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(new ErrorResponse("Failed to fetch Finance Approvals", ex.getMessage()));
+        }
+    }
+
+    @PostMapping("/fetch-approvals-history")
+    public ResponseEntity<?> fetchApprovalsHistory(
+            @RequestBody com.telkom.co.ke.almoptics.dto.ApprovalRequest request,
+            HttpServletResponse response) throws Exception {
+
+        logger.info("Approval History fetch started. Export: {}, ExportAll: {}, Filters: {}",
+                request.getFormat() != null,
+                request.isExportAll(),
+                request.getFilters() != null ? request.getFilters().size() : 0);
+
+        // ENHANCEMENT: Map dateFrom/dateTo to startDate/endDate for service layer
+        if ((request.getStartDate() == null || request.getStartDate().trim().isEmpty()) &&
+            (request.getDateFrom() != null && !request.getDateFrom().trim().isEmpty())) {
+            request.setStartDate(request.getDateFrom());
+        }
+        if ((request.getEndDate() == null || request.getEndDate().trim().isEmpty()) &&
+            (request.getDateTo() != null && !request.getDateTo().trim().isEmpty())) {
+            request.setEndDate(request.getDateTo());
+        }
+
+        // Set defaults if still not provided
+        if (request.getStartDate() == null || request.getStartDate().trim().isEmpty()) {
+            String twoYearsAgo = LocalDate.now().minusYears(2).format(DateTimeFormatter.ISO_DATE);
+            request.setStartDate(twoYearsAgo);
+        }
+        if (request.getEndDate() == null || request.getEndDate().trim().isEmpty()) {
+            String currentDate = LocalDate.now().format(DateTimeFormatter.ISO_DATE);
+            request.setEndDate(currentDate);
+        }
+        logger.info("Date range set for history: startDate={}, endDate={}", request.getStartDate(), request.getEndDate());
+
+        // Determine if this is an export request
+        boolean isExport = request.getFormat() != null &&
+                (request.getFormat().equalsIgnoreCase("csv") || request.getFormat().equalsIgnoreCase("xlsx"));
+
+        long start = System.currentTimeMillis();
+
+        try {
+            if (isExport) {
+                // ====================== EXPORT HANDLING ======================
+                String fmt = request.getFormat().toLowerCase();
+                String filename = "approval_history_" + LocalDate.now().format(DateTimeFormatter.ISO_DATE) + "." + fmt;
+
+                // Set response headers for download
+                response.setHeader(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"");
+                response.setHeader("X-Accel-Buffering", "no");
+                response.setHeader("Cache-Control", "no-cache");
+
+                if ("xlsx".equals(fmt)) {
+                    response.setContentType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+                    approvalWorkflowService.streamHistoryExportToExcel(request, response.getOutputStream());
+                } else {
+                    response.setContentType("text/csv; charset=UTF-8");
+                    response.setCharacterEncoding("UTF-8");
+                    approvalWorkflowService.streamHistoryExportToCsv(request, response.getWriter());
+                }
+
+                logger.info("Approval History export completed. Format: {}, Duration: {} ms",
+                        fmt, System.currentTimeMillis() - start);
+
+                return null; // Streaming response - no body
+
+            } else {
+                // ====================== NORMAL PAGINATED SEARCH ======================
+                PageResult<Map<String, Object>> results = approvalWorkflowService.searchApprovalHistory(request);
+
+                logger.info("Approval History search completed. Duration: {} ms, Total Elements: {}",
+                        System.currentTimeMillis() - start, results.getTotalElements());
+
+                return ResponseEntity.ok(results);
+            }
+
+        } catch (Exception ex) {
+            long duration = System.currentTimeMillis() - start;
+            logger.error("Approval History fetch failed after {} ms", duration, ex);
+
+            // For export requests, we cannot send JSON anymore because headers are already sent
+            if (isExport) {
+                try {
+                    response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+                } catch (Exception ignored) {}
+                return null;
+            }
+
+            // For normal requests, return error JSON
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(new ErrorResponse("Failed to fetch Approval History", ex.getMessage()));
         }
     }
 

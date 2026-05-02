@@ -4,16 +4,56 @@
     <property name="LOG_FILE" value="${LOG_FILE:-${LOG_PATH:-${LOG_TEMP:-${java.io.tmpdir:-/tmp}}/}spring.log}"/>
     <include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
 
+    <!-- ============================================================
+         Application log (existing behaviour, kept as-is)
+         ============================================================ -->
     <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
         <encoder>
             <pattern>${FILE_LOG_PATTERN}</pattern>
         </encoder>
         <file>${LOG_FILE}</file>
         <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
-            daily rollover
+            <!-- daily rollover -->
             <fileNamePattern>${LOG_FILE}-.%d{yyyy-MM-dd}</fileNamePattern>
         </rollingPolicy>
     </appender>
+
+    <!-- ============================================================
+         Audit log – pipe-delimited, machine-parseable.
+
+         Replaces tb_AuditLog. Rationale:
+           * AuditLog rows grew unbounded and blew the row limit on
+             VARCHAR(255).details (see prod incident on /trigger-full-sync).
+           * 99 % of audit reads are "tail the last N events" — far cheaper
+             from a rolling file than from a MySQL table that needs an index
+             on (entityName, action, timestamp) to stay fast.
+           * Disk is cheap; MySQL space + backup overhead is not.
+
+         Format:    timestamp | level | thread | entity | action | user | message
+         Rotation:  daily + size-based (50 MB) with 60 days retained.
+         ============================================================ -->
+    <property name="AUDIT_LOG_FILE"
+              value="${AUDIT_LOG_FILE:-${LOG_PATH:-${LOG_TEMP:-${java.io.tmpdir:-/tmp}}/}alm-audit.log}"/>
+    <appender name="AUDIT_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${AUDIT_LOG_FILE}</file>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} | %-5level | %thread | %msg%n</pattern>
+        </encoder>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${AUDIT_LOG_FILE}.%d{yyyy-MM-dd}.%i.gz</fileNamePattern>
+            <maxFileSize>50MB</maxFileSize>
+            <maxHistory>60</maxHistory>
+            <totalSizeCap>5GB</totalSizeCap>
+        </rollingPolicy>
+    </appender>
+
+    <!-- The "audit" logger is dedicated: events go to the audit file
+         and NOT to the main app log (additivity=false), so the main
+         log stays focused on operational events. -->
+    <logger name="audit" level="INFO" additivity="false">
+        <appender-ref ref="AUDIT_FILE"/>
+    </logger>
+
     <root level="INFO">
         <appender-ref ref="FILE" />
 

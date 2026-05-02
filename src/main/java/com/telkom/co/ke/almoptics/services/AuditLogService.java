@@ -2,34 +2,95 @@ package com.telkom.co.ke.almoptics.services;
 
 import com.telkom.co.ke.almoptics.models.AuditLog;
 import com.telkom.co.ke.almoptics.repository.AuditLogRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+
 import javax.annotation.PostConstruct;
 import java.time.Instant;
 import java.util.Calendar;
+import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 
 /**
+ * Audit log service.
+ *
+ * <p><b>Storage strategy</b> – we now route every audit event into a
+ * dedicated rolling file ({@code alm-audit.log} via the {@code "audit"}
+ * SLF4J logger configured in {@code logback-spring.xml}) <em>instead of</em>
+ * writing it to the {@code tb_AuditLog} MySQL table.</p>
+ *
+ * <p>Why? The DB-backed audit trail had three problems we kept hitting in
+ * production:</p>
+ * <ul>
+ *   <li><b>Storage bloat</b> – every sync run wrote 6+ rows; over months
+ *       the table dominates the schema's footprint and lengthens backups.</li>
+ *   <li><b>Truncation errors</b> – the {@code details VARCHAR(255)} column
+ *       silently rolled back transactions when the orchestrator's per-stage
+ *       summary got long ("Data too long for column 'details'").</li>
+ *   <li><b>Read patterns are file-shaped</b> – the only consumers tail the
+ *       last N events / grep by user-id, never run analytical SQL on it.</li>
+ * </ul>
+ *
+ * <p>Compatibility: the public {@code logAction()} / {@code logStatusChange()}
+ * methods keep their old signatures, and the historical query methods
+ * ({@code getLogsByEntityName}, {@code countTotalLogs}, …) still hit the DB
+ * if it's still populated — so old call-sites don't break and historical
+ * data stays readable. Set {@code audit.persist.db=true} to additionally
+ * keep writing to {@code tb_AuditLog} (off by default).</p>
  *
  * @author Gilian
  */
 @Service
 public class AuditLogService {
 
-    @Autowired
+    /** Application/operational logger – always on. */
+    private static final Logger logger = LoggerFactory.getLogger(AuditLogService.class);
+
+    /**
+     * Dedicated audit logger. Wired in {@code logback-spring.xml} to write
+     * to {@code alm-audit.log} with a size+time rolling policy
+     * (50 MB chunks, 60 days, 5 GB total cap, gz-compressed).
+     * {@code additivity=false} means audit events do NOT pollute the main
+     * application log.
+     */
+    private static final Logger auditFileLogger = LoggerFactory.getLogger("audit");
+
+    @Autowired(required = false)
     private AuditLogRepository auditLogRepository;
 
-    @Autowired
+    @Autowired(required = false)
     private JdbcTemplate jdbcTemplate;
 
     /**
-     * Initializes the AuditLog table if it doesn't exist.
-     * This method runs after dependency injection is complete.
+     * Master switch. {@code false} (default) means audit events go ONLY to
+     * the rolling file; nothing is written to MySQL — exactly what we want
+     * in long-running production deployments. Set to {@code true} when you
+     * need both file + DB during a transition / data-migration window.
+     */
+    @Value("${audit.persist.db:false}")
+    private boolean persistToDb;
+
+    /**
+     * Initialises the legacy {@code tb_AuditLog} table only if DB
+     * persistence has been opted-in. Skipping the CREATE TABLE keeps
+     * fresh deployments clean of the now-deprecated table.
      */
     @PostConstruct
     public void initAuditLogTable() {
+        if (!persistToDb) {
+            logger.info("AuditLogService: DB persistence disabled (audit.persist.db=false). " +
+                    "Events will be written to the 'audit' rolling file only.");
+            return;
+        }
+        if (jdbcTemplate == null) {
+            logger.warn("AuditLogService: persistToDb=true but JdbcTemplate is not available — DB writes will be skipped.");
+            return;
+        }
         String createTableSQL =
                 "CREATE TABLE IF NOT EXISTS `tb_AuditLog` (" +
                         "    `id` BIGINT NOT NULL AUTO_INCREMENT," +
@@ -43,222 +104,157 @@ public class AuditLogService {
                         "    `entityName` VARCHAR(255)," +
                         "    `action` VARCHAR(255)," +
                         "    `performedBy` VARCHAR(255)," +
-                        "    `details` VARCHAR(255)," +
+                        // widened from VARCHAR(255) – the orchestrator
+                        // summary regularly exceeded the old length and
+                        // caused silent rollbacks.
+                        "    `details` VARCHAR(2000)," +
                         "    `timestamp` TIMESTAMP," +
                         "    PRIMARY KEY (`id`)" +
                         ")";
-
         try {
-            // Execute create table statement
             jdbcTemplate.execute(createTableSQL);
-
-            // Create indexes safely by checking if they exist first
             createIndexIfNotExists("idx_entityName", "tb_AuditLog", "entityName");
-            createIndexIfNotExists("idx_action", "tb_AuditLog", "action");
-            createIndexIfNotExists("idx_timestamp", "tb_AuditLog", "timestamp");
-
-            System.out.println("AuditLog table initialization completed successfully");
+            createIndexIfNotExists("idx_action",     "tb_AuditLog", "action");
+            createIndexIfNotExists("idx_timestamp",  "tb_AuditLog", "timestamp");
+            logger.info("AuditLog table initialisation complete (DB persistence ON).");
         } catch (Exception e) {
-            System.err.println("Error initializing AuditLog table: " + e.getMessage());
-            e.printStackTrace();
+            logger.error("Error initialising tb_AuditLog: {}", e.getMessage(), e);
         }
     }
 
-    /**
-     * Creates an index if it doesn't exist already.
-     * MySQL doesn't support "CREATE INDEX IF NOT EXISTS" directly, so we need to check first.
-     *
-     * @param indexName The name of the index to create
-     * @param tableName The name of the table to create the index on
-     * @param columnName The column to index
-     */
     private void createIndexIfNotExists(String indexName, String tableName, String columnName) {
         try {
-            // Check if index exists
             String checkIndex =
                     "SELECT COUNT(1) FROM INFORMATION_SCHEMA.STATISTICS " +
                             "WHERE TABLE_SCHEMA = DATABASE() " +
-                            "AND TABLE_NAME = ? " +
-                            "AND INDEX_NAME = ?";
-
-            Integer indexExists = jdbcTemplate.queryForObject(
-                    checkIndex,
-                    Integer.class,
-                    tableName,
-                    indexName
-            );
-
-            // Create index if it doesn't exist
+                            "  AND TABLE_NAME   = ? " +
+                            "  AND INDEX_NAME   = ?";
+            Integer indexExists = jdbcTemplate.queryForObject(checkIndex, Integer.class, tableName, indexName);
             if (indexExists != null && indexExists == 0) {
-                String createIndex =
-                        "CREATE INDEX " + indexName + " ON " + tableName + "(`" + columnName + "`)";
-                jdbcTemplate.execute(createIndex);
-                System.out.println("Created index: " + indexName);
-            } else {
-                System.out.println("Index already exists: " + indexName);
+                jdbcTemplate.execute("CREATE INDEX " + indexName + " ON " + tableName + "(`" + columnName + "`)");
+                logger.info("Created audit index {}", indexName);
             }
         } catch (Exception e) {
-            System.err.println("Error creating index " + indexName + ": " + e.getMessage());
+            logger.warn("Could not ensure audit index {}: {}", indexName, e.getMessage());
+        }
+    }
+
+    // ==================================================================
+    // PUBLIC LOGGING API – unchanged signatures, new storage backend
+    // ==================================================================
+
+    /**
+     * Logs a generic action. Always written to the audit file. Optionally
+     * mirrored to MySQL when {@code audit.persist.db=true}.
+     */
+    public void logAction(String entityName, String action, String performedBy, String details) {
+        // pipe-delimited so the file is grep-friendly AND splittable for
+        // any downstream parser (Splunk / Loki / awk).
+        auditFileLogger.info("ACTION | entity={} | action={} | by={} | details={}",
+                safe(entityName), safe(action), safe(performedBy), safe(details));
+
+        if (!persistToDb) return;
+        try {
+            AuditLog log = new AuditLog();
+            log.setEntityName(entityName);
+            log.setAction(action);
+            log.setPerformedBy(performedBy);
+            log.setDetails(truncate(details, 2000));
+            log.setTimestamp(Instant.now());
+            auditLogRepository.save(log);
+        } catch (Exception e) {
+            // Never let audit-log persistence break the calling business
+            // operation — file already has the event.
+            logger.warn("DB audit-log write failed (file already captured the event): {}", e.getMessage());
         }
     }
 
     /**
-     * Logs an action performed in the system.
-     *
-     * @param entityName   The name of the entity affected (e.g., "Asset", "Financial Report").
-     * @param action       The action performed (e.g., "INSERT", "UPDATE", "DELETE").
-     * @param performedBy  The user or system that performed the action.
-     * @param details      Additional details or metadata related to the action.
-     */
-    public void logAction(String entityName, String action, String performedBy, String details) {
-        AuditLog log = new AuditLog();
-        log.setEntityName(entityName);
-        log.setAction(action);
-        log.setPerformedBy(performedBy);
-        log.setDetails(details);
-        log.setTimestamp(Instant.now()); // Set the timestamp explicitly
-        auditLogRepository.save(log);
-    }
-
-    /**
-     * Logs a status change for an object.
-     *
-     * @param objectId       The ID of the object being changed.
-     * @param serialNumber   The serial number of the object (if applicable).
-     * @param previousStatus The previous status of the object.
-     * @param newStatus      The new status of the object.
-     * @param nodeType       The type of node/object.
-     * @param notes          Additional notes about the change.
-     * @param performedBy    The user who performed the change.
+     * Logs a status change. Always written to the audit file.
      */
     public void logStatusChange(String objectId, String serialNumber, String previousStatus,
                                 String newStatus, String nodeType, String notes, String performedBy) {
-        AuditLog log = new AuditLog();
+        auditFileLogger.info("STATUS_CHANGE | entity={} | objectId={} | serial={} | {} -> {} | by={} | notes={}",
+                safe(nodeType), safe(objectId), safe(serialNumber),
+                safe(previousStatus), safe(newStatus), safe(performedBy), safe(notes));
 
-        log.setSerialNumber(serialNumber);
-        log.setPreviousStatus(previousStatus);
-        log.setNewStatus(newStatus);
-        log.setNodeType(nodeType);
-        log.setNotes(notes);
-        log.setPerformedBy(performedBy);
-
-        log.setAction("STATUS_CHANGE");
-        log.setEntityName(nodeType);
-        log.setDetails("Status changed from " + previousStatus + " to " + newStatus);
-
-        auditLogRepository.save(log);
+        if (!persistToDb) return;
+        try {
+            AuditLog log = new AuditLog();
+            log.setSerialNumber(serialNumber);
+            log.setPreviousStatus(previousStatus);
+            log.setNewStatus(newStatus);
+            log.setNodeType(nodeType);
+            log.setNotes(truncate(notes, 1000));
+            log.setPerformedBy(performedBy);
+            log.setAction("STATUS_CHANGE");
+            log.setEntityName(nodeType);
+            log.setDetails(truncate("Status changed from " + previousStatus + " to " + newStatus, 2000));
+            auditLogRepository.save(log);
+        } catch (Exception e) {
+            logger.warn("DB audit-log write failed (file already captured the event): {}", e.getMessage());
+        }
     }
 
-    /**
-     * Retrieves all audit logs from the database.
-     *
-     * @return List of all audit logs.
-     */
+    // ==================================================================
+    // QUERY API – kept for backwards compatibility.
+    //
+    // These continue to read from tb_AuditLog so historical data stays
+    // accessible. Once the legacy table is dropped, these methods just
+    // return empty lists / zero counts (the repository handles the
+    // missing-table case).
+    // ==================================================================
+
     public List<AuditLog> getAllLogs() {
-        return auditLogRepository.findAll();
+        return auditLogRepository != null ? auditLogRepository.findAll() : Collections.emptyList();
     }
-
-    /**
-     * Retrieves audit logs by entity name.
-     *
-     * @param entityName The name of the entity to filter logs.
-     * @return List of audit logs related to the specified entity.
-     */
     public List<AuditLog> getLogsByEntityName(String entityName) {
-        return auditLogRepository.findByEntityName(entityName);
+        return auditLogRepository != null ? auditLogRepository.findByEntityName(entityName) : Collections.emptyList();
     }
-
-    /**
-     * Retrieves audit logs by action type.
-     *
-     * @param action The action performed (INSERT, UPDATE, DELETE).
-     * @return List of logs filtered by action type.
-     */
     public List<AuditLog> getLogsByAction(String action) {
-        return auditLogRepository.findByAction(action);
+        return auditLogRepository != null ? auditLogRepository.findByAction(action) : Collections.emptyList();
     }
-
-    /**
-     * Retrieves audit logs for a specific object.
-     *
-     * @param assetId The ID of the object to filter logs.
-     * @return List of audit logs related to the specified object.
-     */
     public List<AuditLog> getLogsByObjectId(String assetId) {
-        return auditLogRepository.findByAssetId(assetId);
+        return auditLogRepository != null ? auditLogRepository.findByAssetId(assetId) : Collections.emptyList();
     }
-
-    /**
-     * Retrieves audit logs for a specific serial number.
-     *
-     * @param serialNumber The serial number to filter logs.
-     * @return List of audit logs related to the specified serial number.
-     */
     public List<AuditLog> getLogsBySerialNumber(String serialNumber) {
-        return auditLogRepository.findBySerialNumber(serialNumber);
+        return auditLogRepository != null ? auditLogRepository.findBySerialNumber(serialNumber) : Collections.emptyList();
     }
-
-    /**
-     * Retrieves audit logs created by a specific user.
-     *
-     * @param performedBy The user who performed the actions.
-     * @return List of audit logs created by the specified user.
-     */
     public List<AuditLog> getLogsByPerformedBy(String performedBy) {
-        return auditLogRepository.findByPerformedBy(performedBy);
+        return auditLogRepository != null ? auditLogRepository.findByPerformedBy(performedBy) : Collections.emptyList();
     }
-
-    /**
-     * Retrieves audit logs within a date range.
-     *
-     * @param startDate The start date of the range.
-     * @param endDate The end date of the range.
-     * @return List of audit logs within the specified date range.
-     */
     public List<AuditLog> getLogsByDateRange(Date startDate, Date endDate) {
-        return auditLogRepository.findByTimestampBetween(startDate, endDate);
+        return auditLogRepository != null ? auditLogRepository.findByTimestampBetween(startDate, endDate)
+                                          : Collections.emptyList();
     }
 
-    /**
-     * Deletes all logs older than a certain number of days to prevent database bloat.
-     *
-     * @param days The number of days after which logs should be deleted.
-     * @return The number of records deleted.
-     */
+    /** Hard-deletes legacy DB rows older than {@code days}. Use as a one-off
+     *  cleanup after migrating to file-based audit. */
     public int deleteOldLogs(int days) {
+        if (auditLogRepository == null) return 0;
         Calendar cal = Calendar.getInstance();
         cal.add(Calendar.DAY_OF_MONTH, -days);
-        Date cutoffDate = cal.getTime();
-
-        return auditLogRepository.deleteByTimestampBefore(cutoffDate);
+        return auditLogRepository.deleteByTimestampBefore(cal.getTime());
     }
 
-    /**
-     * Counts the total number of audit logs in the system.
-     *
-     * @return The total count of audit logs.
-     */
     public long countTotalLogs() {
-        return auditLogRepository.count();
+        return auditLogRepository != null ? auditLogRepository.count() : 0L;
     }
-
-    /**
-     * Counts the number of audit logs for a specific entity.
-     *
-     * @param entityName The name of the entity to count logs for.
-     * @return The count of logs for the specified entity.
-     */
     public long countLogsByEntity(String entityName) {
-        return auditLogRepository.countByEntityName(entityName);
+        return auditLogRepository != null ? auditLogRepository.countByEntityName(entityName) : 0L;
+    }
+    public long countLogsByAction(String action) {
+        return auditLogRepository != null ? auditLogRepository.countByAction(action) : 0L;
     }
 
-    /**
-     * Counts the number of audit logs for a specific action.
-     *
-     * @param action The action to count logs for.
-     * @return The count of logs for the specified action.
-     */
-    public long countLogsByAction(String action) {
-        return auditLogRepository.countByAction(action);
+    // ==================================================================
+    // helpers
+    // ==================================================================
+
+    private static String safe(String s) { return s == null ? "" : s.replace('|', '/'); }
+
+    private static String truncate(String s, int max) {
+        if (s == null) return null;
+        return s.length() <= max ? s : s.substring(0, max - 1) + "…";
     }
 }

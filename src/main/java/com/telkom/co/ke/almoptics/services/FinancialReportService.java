@@ -40,8 +40,9 @@ public interface FinancialReportService {
     // New methods
     tb_FinancialReport calculateDepreciation(String serialNumber, BigDecimal adjustment, String username);
     Page<tb_FinancialReport> findByStatusFlagNotAndNetCostGreaterThan(String statusFlag, BigDecimal netCost, Pageable pageable);
+    Page<tb_FinancialReport> findByStatusFlagNot(String statusFlag, Pageable pageable);
     Map<String, Object> calculateDepreciationForMonth(String date, String search, Pageable pageable);
+    Map<String, Object> calculateDepreciationForMonthV2(String date, String search, Pageable pageable);
     BigDecimal computeMonthlyDepreciation(tb_FinancialReport report);
     List<tb_FinancialReport> findAllByAssetNameInOrAssetSerialNumberIn(List<String> assetIds);
 }
-

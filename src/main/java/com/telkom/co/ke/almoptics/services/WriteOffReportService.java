@@ -35,6 +35,10 @@ public class WriteOffReportService {
     @Autowired
     private AuditLogRepository auditLogRepository;
 
+    /** New file-based audit pipeline. Replaces direct auditLogRepository.save(...). */
+    @Autowired(required = false)
+    private AuditLogService auditLogService;
+
     /**
      * Save a single WriteOffReport with validation and audit logging
      */
@@ -205,14 +209,13 @@ public class WriteOffReportService {
      * Log audit entry for write-off actions
      */
     private void logAudit(WriteOffReport report, String newStatus, String notes) {
-        AuditLog auditLog = new AuditLog();
-        auditLog.setAssetId(report.getAssetId());
-        auditLog.setSerialNumber(report.getSerialNumber());
-        auditLog.setPreviousStatus(report.getStatusFlag());
-        auditLog.setNewStatus(newStatus);
-        auditLog.setChangeDate(LocalDateTime.now());
-        auditLog.setNodeType(report.getAssetType());
-        auditLog.setNotes(notes);
-        auditLogRepository.save(auditLog);
+        // Routed through AuditLogService → file-based 'audit' logger.
+        // tb_AuditLog writes are off by default to keep the DB lean.
+        if (auditLogService != null) {
+            auditLogService.logStatusChange(
+                    report.getAssetId(), report.getSerialNumber(),
+                    report.getStatusFlag(), newStatus,
+                    report.getAssetType(), notes, "SYSTEM");
+        }
     }
 }

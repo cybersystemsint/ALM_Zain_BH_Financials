@@ -44,6 +44,14 @@ public class AssetSyncService {
     private static final long BASE_BACKOFF_MS = 2000;
     private volatile boolean isSyncRunning = false;
 
+    /**
+     * When the new {@link SyncOrchestratorService} is in place, the legacy
+     * cron path here no-ops so we don't sync the same data twice. Override
+     * with {@code sync.legacy.cron.enabled=true} to bring the old path back.
+     */
+    @org.springframework.beans.factory.annotation.Value("${sync.legacy.cron.enabled:false}")
+    private boolean legacyCronEnabled;
+
     @Autowired
     private FinancialReportRepo financialReportRepo;
 
@@ -79,6 +87,10 @@ public class AssetSyncService {
 
     @Autowired
     private EntityManagerFactory entityManagerFactory;
+
+    /** New file-based audit pipeline. Replaces direct auditLogRepository writes. */
+    @Autowired(required = false)
+    private AuditLogService auditLogService;
 //    @Autowired
 //    private NotificationService notificationService;
 
@@ -115,6 +127,11 @@ public class AssetSyncService {
      */
     @Scheduled(cron = "0 0 1 * * ?")
     public void scheduledAssetSync() {
+        if (!legacyCronEnabled) {
+            logger.debug("Legacy AssetSyncService cron disabled (sync.legacy.cron.enabled=false). " +
+                    "SyncOrchestratorService is the active sync path.");
+            return;
+        }
         logger.info("Starting scheduled asset synchronization");
         try {
             CompletableFuture<Void> missingSync = syncMissingAssetsAsync();
@@ -723,18 +740,16 @@ public class AssetSyncService {
 
     private void logAudit(tb_FinancialReport asset, String serialNumber, String previousStatus, String newStatus,
                           String nodeType, String notes) {
-        AuditLog auditLog = new AuditLog();
-        auditLog.setAssetId(asset != null ? String.valueOf(asset.getId()) : null);
-        auditLog.setSerialNumber(serialNumber);
-        auditLog.setPreviousStatus(previousStatus);
-        auditLog.setNewStatus(newStatus);
-        auditLog.setChangeDate(LocalDateTime.now());
-        auditLog.setNodeType(nodeType);
-        auditLog.setNotes(notes);
-        retryOperation(() -> {
-            auditLogRepository.save(auditLog);
-            return null;
-        }, "saveAuditLog");
+        // Audit events now go to the rolling 'audit' file via AuditLogService
+        // (see logback-spring.xml). We deliberately do NOT write directly to
+        // tb_AuditLog any more — the table was bloating the schema and
+        // tripping VARCHAR(255) length errors. AuditLogService still mirrors
+        // to the DB if audit.persist.db=true, so behaviour is opt-in.
+        if (auditLogService != null) {
+            String objectId = asset != null ? String.valueOf(asset.getId()) : null;
+            auditLogService.logStatusChange(objectId, serialNumber, previousStatus,
+                    newStatus, nodeType, notes, "SYSTEM");
+        }
     }
 
 

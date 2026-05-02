@@ -29,6 +29,10 @@ public class MissingAssetCheckService {
     private static final Logger logger = LoggerFactory.getLogger(MissingAssetCheckService.class);
     private static final int MISSING_ASSET_GRACE_PERIOD_DAYS = 14;
 
+    /** Disabled by default once the new orchestrator is in. */
+    @org.springframework.beans.factory.annotation.Value("${sync.legacy.cron.enabled:false}")
+    private boolean legacyCronEnabled;
+
     @Autowired
     private FinancialReportRepo financialReportRepo;
 
@@ -44,6 +48,10 @@ public class MissingAssetCheckService {
     @Autowired
     private AuditLogRepository auditLogRepository;
 
+    /** New file-based audit pipeline. Replaces direct auditLogRepository.save(...). */
+    @Autowired(required = false)
+    private AuditLogService auditLogService;
+
 //    @Autowired
 //    private NotificationService notificationService;
 
@@ -53,6 +61,11 @@ public class MissingAssetCheckService {
      */
     @Scheduled(cron = "0 0 2 * * ?")
     public void scheduledMissingAssetCheck() {
+        if (!legacyCronEnabled) {
+            logger.debug("Legacy MissingAssetCheckService cron disabled. " +
+                    "SyncOrchestratorService now performs missing-asset detection in bulk.");
+            return;
+        }
         logger.info("Starting scheduled missing asset check");
         checkForMissingAssets();
         updateMissingAssetStatus();
@@ -257,16 +270,14 @@ public class MissingAssetCheckService {
      */
     private void createAuditLog(String objectId, String serialNumber, String nodeType,
                                 String previousStatus, String newStatus, String notes) {
-        AuditLog auditLog = new AuditLog();
-        //auditLog.setObjectId(objectId);
-        auditLog.setSerialNumber(serialNumber);
-        auditLog.setPreviousStatus(previousStatus);
-        auditLog.setNewStatus(newStatus);
-       //auditLog.setChangeDate(LocalDateTime.now());
-        auditLog.setNodeType(nodeType);
-        auditLog.setNotes(notes);
-
-        auditLogRepository.save(auditLog);
+        // Routed through AuditLogService → file-based 'audit' logger
+        // (see logback-spring.xml). DB write is opt-in via
+        // audit.persist.db=true. We deliberately stopped writing
+        // tb_AuditLog rows directly from here to avoid table bloat.
+        if (auditLogService != null) {
+            auditLogService.logStatusChange(objectId, serialNumber, previousStatus,
+                    newStatus, nodeType, notes, "SYSTEM");
+        }
     }
 
     /**

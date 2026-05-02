@@ -31,12 +31,21 @@ public class FinancialSyncScheduler {
     @Autowired
     private MissingAssetCheckService missingAssetCheckService;
 
+    /** Disabled by default once SyncOrchestratorService is in. */
+    @org.springframework.beans.factory.annotation.Value("${sync.legacy.cron.enabled:false}")
+    private boolean legacyCronEnabled;
+
     /**
      * Main scheduled job that coordinates all asset synchronization processes.
      * Runs daily at 12:01 AM
      */
     @Scheduled(cron = "0 1 0 * * ?")
     public void runDailyFinancialSync() {
+        if (!legacyCronEnabled) {
+            logger.debug("Legacy FinancialSyncScheduler.runDailyFinancialSync disabled. " +
+                    "SyncOrchestratorService now drives the cycle.");
+            return;
+        }
         LocalDateTime startTime = LocalDateTime.now();
         logger.info("Starting daily financial sync process at {}", formatter.format(startTime));
 

@@ -138,7 +138,7 @@ public class tb_FinancialReport implements Serializable {
     private String description;
 
     @Column(name = "OracleAssetID")
-    @JsonProperty("oracleAssetID")
+    @JsonProperty("OracleAssetID")
     private String oracleAssetId;
 
     @Column(name = "DateOfService")

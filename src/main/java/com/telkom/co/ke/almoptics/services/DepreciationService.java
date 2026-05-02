@@ -1,107 +1,62 @@
 package com.telkom.co.ke.almoptics.services;
-
 import com.telkom.co.ke.almoptics.entities.tb_FinancialReport;
 import com.telkom.co.ke.almoptics.repository.FinancialReportRepo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageRequest;
-import org.springframework.data.domain.Pageable;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-
-import java.math.BigDecimal;
-import java.util.ArrayList;
-import java.util.List;
+import java.time.LocalDate;
+import java.time.YearMonth;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.Date;
 
 @Service
 public class DepreciationService {
-
     private static final Logger logger = LoggerFactory.getLogger(DepreciationService.class);
-
     @Autowired
     private FinancialReportService financialReportService;
-
     @Autowired
     private FinancialReportRepo financialReportRepo;
 
+    @Scheduled(cron = "0 0 0 L * ?") // Runs at midnight (00:00:00) on the last day of every month
     @Transactional
     public void calculateMonthlyDepreciation() {
         logger.info("Starting monthly depreciation calculation for all assets");
-
         try {
-            int pageSize = 100;
-            int pageNumber = 0;
-            Page<tb_FinancialReport> reportPage;
-            int totalProcessed = 0;
-            int totalFailed = 0;
-            List<tb_FinancialReport> batchToSave = new ArrayList<>();
+            int totalUpdated = 0;
+            // Step 1: Reset MonthlyDepreciationAmount and AccumulatedDepreciation to NULL for valid assets
+            int resetMonthly = financialReportRepo.resetMonthlyDepreciationAmount();
+            int resetAccumulated = financialReportRepo.resetAccumulatedDepreciation();
+            int resetNetcost = financialReportRepo.resetNetCost();
+            logger.info("Reset {} records for MonthlyDepreciationAmount, {} for AccumulatedDepreciation, and {} for NetCost", resetMonthly, resetAccumulated, resetNetcost);
 
-            do {
-                Pageable pageable = PageRequest.of(pageNumber, pageSize);
-                reportPage = financialReportService.findByStatusFlagNotAndNetCostGreaterThan(
-                        "DECOMMISSIONED", BigDecimal.ZERO, pageable);
-                List<tb_FinancialReport> reports = reportPage.getContent();
+            // Step 2: Update MonthlyDepreciationAmount for valid assets
+            int updatedMonthly = financialReportRepo.updateMonthlyDepreciation();
+            totalUpdated += updatedMonthly;
+            logger.info("Updated MonthlyDepreciationAmount for {} assets", updatedMonthly);
 
-                for (tb_FinancialReport report : reports) {
-                    try {
-                        String assetSerialNumber = report.getAssetSerialNumber();
-                        String assetName = report.getAssetName();
+            // Step 3: Update AccumulatedDepreciation for valid assets
+            int updatedAccumulated = financialReportRepo.updateAccumulatedDepreciation();
+            totalUpdated += updatedAccumulated;
+            logger.info("Updated AccumulatedDepreciation for {} assets", updatedAccumulated);
 
-                        // Skip if both assetSerialNumber and assetName are null
-                        if (assetSerialNumber == null && assetName == null) {
-                            logger.warn("Skipping asset with null serial number and name: {}", report.getId());
-                            continue;
-                        }
+            // Step 4: Adjust NetCost and AccumulatedDepreciation where necessary
+            int adjusted = financialReportRepo.adjustNetCostAndAccumulatedDepreciation();
+            logger.info("Adjusted NetCost and AccumulatedDepreciation for {} assets", adjusted);
 
-                        // Skip assets that are decommissioned or have zero net cost
-                        if (report.getWriteOffDate() != null ||
-                                report.getNetCost().compareTo(BigDecimal.ZERO) <= 0) {
-                            logger.debug("Skipping asset {}: already decommissioned or net cost is zero",
-                                    assetSerialNumber != null ? assetSerialNumber : assetName);
-                            continue;
-                        }
+            // Step 5: Update NetCost for valid assets (batch update)
+            int updateNetCost = financialReportRepo.updateNetCost();
+            logger.info("Updated NetCost {} assets", updateNetCost);
 
-                        // Skip if usefulLifeMonths is invalid
-                        if (report.getUsefulLifeMonths() == null || report.getUsefulLifeMonths() <= 0) {
-                            logger.warn("Skipping asset {}: useful life months is missing or invalid", assetSerialNumber != null ? assetSerialNumber : assetName);
-                            continue;
-                        }
+            // Step 6: Update RetirementDate for valid assets (batch update)
+            int updatedRetirement = financialReportRepo.updateRetirementDate();
+            logger.info("Updated RetirementDate for {} assets", updatedRetirement);
 
-                        // Calculate depreciation directly on the fetched report
-                        BigDecimal monthlyDep = financialReportService.computeMonthlyDepreciation(report);
-                        if (monthlyDep != null) {
-                            report.setMonthlyDepreciationAmount(monthlyDep);
-                            BigDecimal newAccumulated = report.getAccumulatedDepreciation().add(monthlyDep);
-                            report.setAccumulatedDepreciation(newAccumulated);
-                            BigDecimal newNetCost = report.getNetCost().subtract(monthlyDep);
-                            report.setNetCost(newNetCost);
-                            batchToSave.add(report);
-                            totalProcessed++;
-                            logger.debug("Depreciation calculated for asset: {}", assetSerialNumber != null ? assetSerialNumber : assetName);
-                        } else {
-                            logger.warn("Skipping asset {}: could not compute monthly depreciation", assetSerialNumber != null ? assetSerialNumber : assetName);
-                        }
-                    } catch (Exception e) {
-                        totalFailed++;
-                        logger.error("Failed to calculate depreciation for asset {}: {}",
-                                report.getAssetSerialNumber() != null ? report.getAssetSerialNumber() : report.getAssetName(),
-                                e.getMessage());
-                    }
-                }
 
-                // Batch save after processing page
-                if (!batchToSave.isEmpty()) {
-                    financialReportRepo.saveAll(batchToSave);
-                    batchToSave.clear();
-                }
-
-                pageNumber++;
-            } while (reportPage.hasNext());
-
-            logger.info("Monthly depreciation calculation completed. Processed: {}, Failed: {}",
-                    totalProcessed, totalFailed);
+            logger.info("Monthly depreciation calculation completed. Total updated: {}", totalUpdated);
         } catch (Exception e) {
             logger.error("Unexpected error during monthly depreciation calculation", e);
         }

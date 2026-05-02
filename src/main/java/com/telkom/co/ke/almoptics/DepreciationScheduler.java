@@ -17,9 +17,9 @@ public class DepreciationScheduler {
 
     /**
      * Scheduled task to calculate depreciation for all active financial reports.
-     * Runs on the 1st day of each month at 00:01 AM in Africa/Nairobi timezone.
+     * Runs on the last day of each month at 23:59 PM in Africa/Nairobi timezone.
      */
-    @Scheduled(cron = "${depreciation.scheduler.cron:0 1 0 1 * ?}", zone = "Africa/Nairobi")
+    @Scheduled(cron = "${depreciation.scheduler.cron:0 59 23 L * ?}", zone = "Africa/Nairobi")
     public void calculateMonthlyDepreciation() {
         logger.info("Scheduled depreciation calculation triggered at {}", java.time.LocalDateTime.now());
         depreciationService.calculateMonthlyDepreciation();

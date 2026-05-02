@@ -1,12 +1,15 @@
 package com.telkom.co.ke.almoptics.services;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.telkom.co.ke.almoptics.entities.ApprovalStatus;
+import com.telkom.co.ke.almoptics.dto.ApprovalRequest;
+import com.telkom.co.ke.almoptics.dto.PageResult;
 import com.telkom.co.ke.almoptics.entities.tb_ApprovalWorkflow;
 import com.telkom.co.ke.almoptics.models.ApprovalWorkflow;
 import com.telkom.co.ke.almoptics.entities.tb_FinancialReport;
 import com.telkom.co.ke.almoptics.models.AuditLog;
 import com.telkom.co.ke.almoptics.repository.*;
+import org.apache.poi.ss.usermodel.Row;
+import org.apache.poi.xssf.streaming.SXSSFWorkbook;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -19,6 +22,8 @@ import org.springframework.transaction.annotation.Propagation;
 
 import javax.persistence.EntityManager;
 import javax.persistence.PersistenceContext;
+import java.io.OutputStream;
+import java.io.PrintWriter;
 import java.math.BigDecimal;
 import java.text.SimpleDateFormat;
 import java.time.Duration;
@@ -29,6 +34,9 @@ import java.util.*;
 import java.util.stream.Collectors;
 import java.security.SecureRandom;
 import org.springframework.data.jpa.domain.Specification;
+import org.apache.poi.xssf.streaming.SXSSFSheet;
+
+import javax.persistence.Query;
 import javax.persistence.criteria.Predicate;
 import javax.persistence.criteria.Root;
 import javax.persistence.criteria.Subquery;
@@ -53,6 +61,10 @@ public class ApprovalWorkflowService {
 
     @Autowired
     private AuditLogRepository auditLogRepository;
+
+    /** New file-based audit pipeline. Replaces direct auditLogRepository.save(...). */
+    @Autowired(required = false)
+    private AuditLogService auditLogService;
 
 //    @Autowired
 //    private NotificationService notificationService;
@@ -865,14 +877,13 @@ public class ApprovalWorkflowService {
 
     private void createAuditLog(String objectId, String serialNumber, String nodeType,
                                 String previousStatus, String newStatus, String notes) {
-        AuditLog auditLog = new AuditLog();
-        auditLog.setSerialNumber(serialNumber);
-        auditLog.setPreviousStatus(previousStatus);
-        auditLog.setNewStatus(newStatus);
-        auditLog.setChangeDate(LocalDateTime.now());
-        auditLog.setNodeType(nodeType);
-        auditLog.setNotes(notes);
-        auditLogRepository.save(auditLog);
+        // Routed through AuditLogService → file-based 'audit' logger.
+        // tb_AuditLog writes are off by default (audit.persist.db=false)
+        // to keep the DB lean.
+        if (auditLogService != null) {
+            auditLogService.logStatusChange(objectId, serialNumber, previousStatus,
+                    newStatus, nodeType, notes, "SYSTEM");
+        }
     }
 
     // Modified ApprovalWorkflowService.findByFilters (added objectStatus param and subquery)
@@ -965,5 +976,777 @@ public class ApprovalWorkflowService {
     private void sendApprovalNotification(tb_ApprovalWorkflow workflow, String notificationType,
                                           String serialNumber, String nodeType) {
         // Implementation unchanged
+    }
+
+    /**
+     * Search for completed approvals (APPROVED or REJECTED status)
+     * Used for historical tracking of all completed approval workflows
+     * No team filtering - returns entire history
+     */
+    @Transactional(readOnly = true)
+    public PageResult<Map<String, Object>> searchApprovalHistory(ApprovalRequest request) {
+        int page = request.getPage() != null ? request.getPage() : 0;
+        int size = request.getSize() != null && request.getSize() > 0 ? request.getSize() : 100;
+
+        List<Map<String, Object>> data = fetchApprovalHistoryBatchForPage(request, page * size, size);
+        long totalElements = countApprovalHistory(request);
+
+        PageResult<Map<String, Object>> result = new PageResult<>();
+        result.setTotalElements(totalElements);
+        result.setTotalPages((int) Math.ceil((double) totalElements / size));
+        result.setPage(page);
+        result.setSize(size);
+        result.setdata(data);
+
+        return result;
+    }
+
+    /**
+     * Fetch approval history batch for page display
+     */
+    private List<Map<String, Object>> fetchApprovalHistoryBatchForPage(ApprovalRequest request, int offset, int limit) {
+        StringBuilder sql = new StringBuilder("""
+        SELECT w.ID as WORKFLOW_ID, w.Object_Type, w.ASSET_ID, w.ORIGINAL_STATUS, w.UPDATED_STATUS,
+               w.PROCESS_ID, w.INSERTEDBY as REQUESTER, w.CHANGEDBY as UPDATER, w.COMMENTS,
+               w.INSERTDATE, w.CHANGEDATE,
+               fr.siteId as WAREHOUSE_ID, fr.assetSerialNumber as ASSET_SERIAL_NUMBER
+        FROM tb_WF_Financial_Approval_Request w
+        LEFT JOIN tb_FinancialReport fr
+            ON (fr.assetName = w.ASSET_ID OR fr.assetSerialNumber = w.ASSET_ID)
+        WHERE (LOWER(w.UPDATED_STATUS) = 'approved' OR LOWER(w.UPDATED_STATUS) = 'rejected')
+        """);
+
+        List<Object> params = new ArrayList<>();
+
+        buildApprovalHistoryFilters(sql, params, request);
+
+        sql.append(" ORDER BY w.CHANGEDATE DESC LIMIT ? OFFSET ?");
+        params.add(limit);
+        params.add(offset);
+
+        Query query = entityManager.createNativeQuery(sql.toString());
+
+        for (int i = 0; i < params.size(); i++) {
+            query.setParameter(i + 1, params.get(i));
+        }
+
+        @SuppressWarnings("unchecked")
+        List<Object[]> rows = query.getResultList();
+
+        return convertToMapList(rows);
+    }
+
+    /**
+     * Count approval history records matching filters
+     */
+    private long countApprovalHistory(ApprovalRequest request) {
+        StringBuilder sql = new StringBuilder("""
+        SELECT COUNT(*)
+        FROM tb_WF_Financial_Approval_Request w
+        LEFT JOIN tb_FinancialReport fr
+            ON (fr.assetName = w.ASSET_ID OR fr.assetSerialNumber = w.ASSET_ID)
+        WHERE (LOWER(w.UPDATED_STATUS) = 'approved' OR LOWER(w.UPDATED_STATUS) = 'rejected')
+        """);
+
+        List<Object> params = new ArrayList<>();
+
+        buildApprovalHistoryFilters(sql, params, request);
+
+        Query query = entityManager.createNativeQuery(sql.toString());
+        for (int i = 0; i < params.size(); i++) {
+            query.setParameter(i + 1, params.get(i));
+        }
+
+        return ((Number) query.getSingleResult()).longValue();
+    }
+
+    /**
+     * Build filters for approval history (no team filter, history focused)
+     */
+    private void buildApprovalHistoryFilters(StringBuilder sql, List<Object> params, ApprovalRequest request) {
+        // 1. Multi-filters (new flexible way)
+        if (request.getFilters() != null && !request.getFilters().isEmpty()) {
+            for (ApprovalRequest.Filter f : request.getFilters()) {
+                if (f.getColumn() == null || f.getColumn().trim().isEmpty()) continue;
+
+                String col = f.getColumn().trim();
+                String value = f.getValue() != null ? f.getValue().trim() : "";
+                if (value.isEmpty()) continue;
+
+                String operator = f.getOperator() != null ? f.getOperator().name() : "CONTAINS";
+
+                appendFilterCondition(sql, params, col, value, operator);
+            }
+        }
+
+        // 2. Legacy / backward compatibility filters (NO TEAM FILTER FOR HISTORY)
+        appendSimpleFilter(sql, params, "w.Object_Type", request.getObjectType());
+        appendSimpleFilter(sql, params, "w.ASSET_ID", request.getAssetId());
+        appendSimpleFilter(sql, params, "w.ORIGINAL_STATUS", request.getOriginalStatus());
+        appendSimpleFilter(sql, params, "w.UPDATED_STATUS", request.getUpdatedStatus());
+
+        if (request.getProcessId() != null && !request.getProcessId().isBlank()) {
+            try {
+                sql.append(" AND w.PROCESS_ID = ?");
+                params.add(Integer.parseInt(request.getProcessId()));
+            } catch (Exception ignored) {}
+        }
+
+        // Date filtering based on CHANGEDATE for history (when it was completed)
+        if (request.getStartDate() != null && !request.getStartDate().isBlank()) {
+            sql.append(" AND w.CHANGEDATE >= ?");
+            params.add(request.getStartDate() + " 00:00:00");
+        }
+        if (request.getEndDate() != null && !request.getEndDate().isBlank()) {
+            sql.append(" AND w.CHANGEDATE <= ?");
+            params.add(request.getEndDate() + " 23:59:59");
+        }
+
+        if (request.getObjectStatus() != null && !request.getObjectStatus().isBlank()) {
+            sql.append("""
+            AND EXISTS (
+                SELECT 1 FROM tb_FinancialReport fr2
+                WHERE (fr2.assetName = w.ASSET_ID OR fr2.assetSerialNumber = w.ASSET_ID)
+                  AND LOWER(fr2.statusFlag) = LOWER(?)
+            )
+            """);
+            params.add(request.getObjectStatus());
+        }
+    }
+
+    /**
+     * Stream approval history to CSV export
+     */
+    public void streamHistoryExportToCsv(ApprovalRequest request, PrintWriter writer) {
+        logger.info("Approval History CSV export started. ExportAll: {}", request.isExportAll());
+
+        SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+        writer.println(String.join(",", EXPORT_HEADERS));
+        writer.flush();
+
+        Integer lastId = null;
+        int exported = 0;
+        int limit = request.isExportAll() ? Integer.MAX_VALUE : EXPORT_LIMIT;
+        boolean hasMore = true;
+        long totalStart = System.currentTimeMillis();
+
+        while (hasMore) {
+            long batchStart = System.currentTimeMillis();
+            int batchSize = Math.min(EXPORT_BATCH_SIZE, limit - exported);
+            if (batchSize <= 0) break;
+
+            List<Map<String, Object>> batch = fetchApprovalHistoryExportBatch(request, lastId, batchSize);
+
+            if (batch.isEmpty()) {
+                hasMore = false;
+                break;
+            }
+
+            for (Map<String, Object> item : batch) {
+                writer.println(toCsvRow(item));
+                exported++;
+            }
+            writer.flush();
+
+            logger.info("Approval History CSV batch exported: {} rows | lastId={} | took {} ms",
+                    batch.size(), lastId, System.currentTimeMillis() - batchStart);
+
+            if (batch.size() < batchSize || exported >= limit) {
+                hasMore = false;
+            } else {
+                lastId = (Integer) batch.get(batch.size() - 1).get("WORKFLOW_ID");
+            }
+        }
+        logger.info("Approval History CSV export completed. Total: {} rows | Duration: {} ms",
+                exported, System.currentTimeMillis() - totalStart);
+    }
+
+    /**
+     * Stream approval history to Excel export
+     */
+    public void streamHistoryExportToExcel(ApprovalRequest request, OutputStream out) throws Exception {
+        logger.info("Approval History Excel export started. ExportAll: {}", request.isExportAll());
+
+        SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+        SXSSFWorkbook workbook = new SXSSFWorkbook(500);
+        workbook.setCompressTempFiles(true);
+
+        try {
+            SXSSFSheet sheet = workbook.createSheet("ApprovalHistory");
+            Row headerRow = sheet.createRow(0);
+            for (int i = 0; i < EXPORT_HEADERS.length; i++) {
+                headerRow.createCell(i).setCellValue(EXPORT_HEADERS[i]);
+            }
+
+            int rowIdx = 1;
+            Integer lastId = null;
+            int exported = 0;
+            int limit = request.isExportAll() ? Integer.MAX_VALUE : EXPORT_LIMIT;
+            boolean hasMore = true;
+            long totalStart = System.currentTimeMillis();
+
+            while (hasMore) {
+                long batchStart = System.currentTimeMillis();
+                int batchSize = Math.min(EXPORT_BATCH_SIZE, limit - exported);
+                if (batchSize <= 0) break;
+
+                List<Map<String, Object>> batch = fetchApprovalHistoryExportBatch(request, lastId, batchSize);
+
+                if (batch.isEmpty()) {
+                    hasMore = false;
+                    break;
+                }
+
+                for (Map<String, Object> item : batch) {
+                    Row row = sheet.createRow(rowIdx++);
+                    fillExcelRow(row, item);
+                    exported++;
+                }
+
+                logger.info("Approval History Excel batch exported: {} rows | lastId={} | took {} ms",
+                        batch.size(), lastId, System.currentTimeMillis() - batchStart);
+
+                if (batch.size() < batchSize || exported >= limit) {
+                    hasMore = false;
+                } else {
+                    lastId = (Integer) batch.get(batch.size() - 1).get("WORKFLOW_ID");
+                }
+            }
+
+            workbook.write(out);
+            out.flush();
+            logger.info("Approval History Excel export completed. Total: {} rows | Duration: {} ms",
+                    exported, System.currentTimeMillis() - totalStart);
+
+        } finally {
+            workbook.dispose();
+            try { workbook.close(); } catch (Exception ignored) {}
+        }
+    }
+
+    /**
+     * Fetch approval history export batch using cursor pagination
+     */
+    private List<Map<String, Object>> fetchApprovalHistoryExportBatch(ApprovalRequest request, Integer lastId, int limit) {
+        StringBuilder sql = new StringBuilder("""
+        SELECT w.ID as WORKFLOW_ID, w.Object_Type, w.ASSET_ID, w.ORIGINAL_STATUS, w.UPDATED_STATUS,
+               w.PROCESS_ID, w.INSERTEDBY as REQUESTER, w.CHANGEDBY as UPDATER, w.COMMENTS,
+               w.INSERTDATE, w.CHANGEDATE,
+               fr.siteId as WAREHOUSE_ID, fr.assetSerialNumber as ASSET_SERIAL_NUMBER
+        FROM tb_WF_Financial_Approval_Request w
+        LEFT JOIN tb_FinancialReport fr
+            ON (fr.assetName = w.ASSET_ID OR fr.assetSerialNumber = w.ASSET_ID)
+        WHERE (LOWER(w.UPDATED_STATUS) = 'approved' OR LOWER(w.UPDATED_STATUS) = 'rejected')
+        """);
+
+        List<Object> params = new ArrayList<>();
+        buildApprovalHistoryFilters(sql, params, request);
+
+        // Cursor pagination - using ID ASC for stability
+        if (lastId != null && lastId > 0) {
+            sql.append(" AND w.ID > ?");
+            params.add(lastId);
+        }
+
+        sql.append(" ORDER BY w.ID ASC LIMIT ?");
+        params.add(limit);
+
+        Query query = entityManager.createNativeQuery(sql.toString());
+
+        for (int i = 0; i < params.size(); i++) {
+            query.setParameter(i + 1, params.get(i));
+        }
+
+        @SuppressWarnings("unchecked")
+        List<Object[]> rows = query.getResultList();
+        return convertToMapList(rows);
+    }
+
+
+
+    // ====================== CONSTANTS ======================
+    private static final int EXPORT_BATCH_SIZE = 100_000;
+    private static final int EXPORT_LIMIT = 1_000_000; // Adjust based on your needs
+
+    private static final String[] EXPORT_HEADERS = {
+            "WORKFLOW_ID", "OBJECT_TYPE", "ASSET_ID", "ORIGINAL_STATUS", "UPDATED_STATUS",
+            "PROCESS_ID", "REQUESTER", "UPDATER", "COMMENTS", "INSERTDATE", "CHANGEDATE",
+            "WAREHOUSE_ID", "ASSET_SERIAL_NUMBER"
+    };
+
+    public PageResult<Map<String, Object>> multiFilterSearch(ApprovalRequest request) {
+        int page = request.getPage() != null ? request.getPage() : 0;
+        int size = request.getSize() != null && request.getSize() > 0 ? request.getSize() : 100;
+
+        List<Map<String, Object>> data = fetchApprovalBatchForPage(request, page * size, size);
+        long totalElements = countApprovals(request);
+
+        PageResult<Map<String, Object>> result = new PageResult<>();
+        result.setTotalElements(totalElements);
+        result.setTotalPages((int) Math.ceil((double) totalElements / size));
+        result.setPage(page);
+        result.setSize(size);
+        result.setdata(data);
+
+        return result;
+    }
+
+
+    public void streamExportToCsv(ApprovalRequest request, PrintWriter writer) {
+        logger.info("Approval CSV export started. ExportAll: {}", request.isExportAll());
+
+        SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+        writer.println(String.join(",", EXPORT_HEADERS));
+        writer.flush();
+
+        Integer lastId = null;
+        int exported = 0;
+        int limit = request.isExportAll() ? Integer.MAX_VALUE : EXPORT_LIMIT;
+        boolean hasMore = true;
+        long totalStart = System.currentTimeMillis();
+
+        while (hasMore) {
+            long batchStart = System.currentTimeMillis();
+            int batchSize = Math.min(EXPORT_BATCH_SIZE, limit - exported);
+            if (batchSize <= 0) break;
+
+            List<Map<String, Object>> batch = fetchApprovalExportBatch(request, lastId, batchSize);
+
+            if (batch.isEmpty()) {
+                hasMore = false;
+                break;
+            }
+
+            for (Map<String, Object> item : batch) {
+                writer.println(toCsvRow(item));
+                exported++;
+            }
+            writer.flush();
+
+            logger.info("Approval CSV batch exported: {} rows | lastId={} | took {} ms",
+                    batch.size(), lastId, System.currentTimeMillis() - batchStart);
+
+            if (batch.size() < batchSize || exported >= limit) {
+                hasMore = false;
+            } else {
+                lastId = (Integer) batch.get(batch.size() - 1).get("WORKFLOW_ID");
+            }
+        }
+        logger.info("Approval CSV export completed. Total: {} rows | Duration: {} ms",
+                exported, System.currentTimeMillis() - totalStart);
+    }
+
+    public void streamExportToExcel(ApprovalRequest request, OutputStream out) throws Exception {
+        logger.info("Approval Excel export started. ExportAll: {}", request.isExportAll());
+
+        SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+        SXSSFWorkbook workbook = new SXSSFWorkbook(500);
+        workbook.setCompressTempFiles(true);
+
+        try {
+            SXSSFSheet sheet = workbook.createSheet("FinanceApprovals");
+            Row headerRow = sheet.createRow(0);
+            for (int i = 0; i < EXPORT_HEADERS.length; i++) {
+                headerRow.createCell(i).setCellValue(EXPORT_HEADERS[i]);
+            }
+
+            int rowIdx = 1;
+            Integer lastId = null;
+            int exported = 0;
+            int limit = request.isExportAll() ? Integer.MAX_VALUE : EXPORT_LIMIT;
+            boolean hasMore = true;
+            long totalStart = System.currentTimeMillis();
+
+            while (hasMore) {
+                long batchStart = System.currentTimeMillis();
+                int batchSize = Math.min(EXPORT_BATCH_SIZE, limit - exported);
+                if (batchSize <= 0) break;
+
+                List<Map<String, Object>> batch = fetchApprovalExportBatch(request, lastId, batchSize);
+
+                if (batch.isEmpty()) {
+                    hasMore = false;
+                    break;
+                }
+
+                for (Map<String, Object> item : batch) {
+                    Row row = sheet.createRow(rowIdx++);
+                    fillExcelRow(row, item);
+                    exported++;
+                }
+
+                logger.info("Approval Excel batch exported: {} rows | lastId={} | took {} ms",
+                        batch.size(), lastId, System.currentTimeMillis() - batchStart);
+
+                if (batch.size() < batchSize || exported >= limit) {
+                    hasMore = false;
+                } else {
+                    lastId = (Integer) batch.get(batch.size() - 1).get("WORKFLOW_ID");
+                }
+            }
+
+            workbook.write(out);
+            out.flush();
+            logger.info("Approval Excel export completed. Total: {} rows | Duration: {} ms",
+                    exported, System.currentTimeMillis() - totalStart);
+
+        } finally {
+            workbook.dispose();
+            try { workbook.close(); } catch (Exception ignored) {}
+        }
+    }
+
+    // ====================== ROW HELPERS ======================
+    private String toCsvRow(Map<String, Object> item) {
+        return String.join(",",
+                csvSafe(item.get("WORKFLOW_ID")),
+                csvSafe(item.get("OBJECT_TYPE")),
+                csvSafe(item.get("ASSET_ID")),
+                csvSafe(item.get("ORIGINAL_STATUS")),
+                csvSafe(item.get("UPDATED_STATUS")),
+                csvSafe(item.get("PROCESS_ID")),
+                csvSafe(item.get("REQUESTER")),
+                csvSafe(item.get("UPDATER")),
+                csvSafe(item.get("COMMENTS")),
+                csvSafe(item.get("INSERTDATE")),
+                csvSafe(item.get("CHANGEDATE")),
+                csvSafe(item.get("WAREHOUSE_ID")),
+                csvSafe(item.get("ASSET_SERIAL_NUMBER"))
+        );
+    }
+
+    private void fillExcelRow(Row row, Map<String, Object> item) {
+        int col = 0;
+        row.createCell(col++).setCellValue(safe(item.get("WORKFLOW_ID")));
+        row.createCell(col++).setCellValue(safe(item.get("OBJECT_TYPE")));
+        row.createCell(col++).setCellValue(safe(item.get("ASSET_ID")));
+        row.createCell(col++).setCellValue(safe(item.get("ORIGINAL_STATUS")));
+        row.createCell(col++).setCellValue(safe(item.get("UPDATED_STATUS")));
+        row.createCell(col++).setCellValue(safe(item.get("PROCESS_ID")));
+        row.createCell(col++).setCellValue(safe(item.get("REQUESTER")));
+        row.createCell(col++).setCellValue(safe(item.get("UPDATER")));
+        row.createCell(col++).setCellValue(safe(item.get("COMMENTS")));
+        row.createCell(col++).setCellValue(safe(item.get("INSERTDATE")));
+        row.createCell(col++).setCellValue(safe(item.get("CHANGEDATE")));
+        row.createCell(col++).setCellValue(safe(item.get("WAREHOUSE_ID")));
+        row.createCell(col++).setCellValue(safe(item.get("ASSET_SERIAL_NUMBER")));
+    }
+
+    private String csvSafe(Object val) {
+        if (val == null) return "";
+        String s = val.toString();
+        if (s.contains(",") || s.contains("\"") || s.contains("\n")) {
+            return "\"" + s.replace("\"", "\"\"") + "\"";
+        }
+        return s;
+    }
+
+    private String safe(Object val) {
+        return val == null ? "" : val.toString();
+    }
+
+    // ====================== CORE BATCH FETCH FOR EXPORT (Cursor-based, ASC) ======================
+    private List<Map<String, Object>> fetchApprovalExportBatch(ApprovalRequest request, Integer lastId, int limit) {
+        StringBuilder sql = new StringBuilder("""
+        SELECT w.ID as WORKFLOW_ID, w.Object_Type, w.ASSET_ID, w.ORIGINAL_STATUS, w.UPDATED_STATUS,
+               w.PROCESS_ID, w.INSERTEDBY as REQUESTER, w.CHANGEDBY as UPDATER, w.COMMENTS,
+               w.INSERTDATE, w.CHANGEDATE,
+               fr.siteId as WAREHOUSE_ID, fr.assetSerialNumber as ASSET_SERIAL_NUMBER
+        FROM tb_WF_Financial_Approval_Request w
+        LEFT JOIN tb_FinancialReport fr 
+            ON (fr.assetName = w.ASSET_ID OR fr.assetSerialNumber = w.ASSET_ID)
+        WHERE 1=1
+        """);
+
+        List<Object> params = new ArrayList<>();
+        buildApprovalFilters(sql, params, request);
+
+        // Cursor pagination - using ID ASC for stability
+        if (lastId != null && lastId > 0) {
+            sql.append(" AND w.ID > ?");
+            params.add(lastId);
+        }
+
+        sql.append(" ORDER BY w.ID ASC LIMIT ?");
+        params.add(limit);
+
+        Query query = entityManager.createNativeQuery(sql.toString());
+
+        for (int i = 0; i < params.size(); i++) {
+            query.setParameter(i + 1, params.get(i));
+        }
+
+        @SuppressWarnings("unchecked")
+        List<Object[]> rows = query.getResultList();
+        return convertToMapList(rows);
+    }
+
+    // ====================== COUNT FOR PAGINATION ======================
+    private long countApprovals(ApprovalRequest request) {
+        StringBuilder sql = new StringBuilder("""
+        SELECT COUNT(*) 
+        FROM tb_WF_Financial_Approval_Request w
+        LEFT JOIN tb_FinancialReport fr 
+            ON (fr.assetName = w.ASSET_ID OR fr.assetSerialNumber = w.ASSET_ID)
+        WHERE 1=1
+        """);
+
+        List<Object> params = new ArrayList<>();
+
+        buildApprovalFilters(sql, params, request);
+
+        Query query = entityManager.createNativeQuery(sql.toString());
+        for (int i = 0; i < params.size(); i++) {
+            query.setParameter(i + 1, params.get(i));
+        }
+
+        return ((Number) query.getSingleResult()).longValue();
+    }
+
+    // ====================== PAGE FETCH (for UI pagination) ======================
+    private List<Map<String, Object>> fetchApprovalBatchForPage(ApprovalRequest request, int offset, int limit) {
+        StringBuilder sql = new StringBuilder("""
+        SELECT w.ID as WORKFLOW_ID, w.Object_Type, w.ASSET_ID, w.ORIGINAL_STATUS, w.UPDATED_STATUS,
+               w.PROCESS_ID, w.INSERTEDBY as REQUESTER, w.CHANGEDBY as UPDATER, w.COMMENTS,
+               w.INSERTDATE, w.CHANGEDATE,
+               fr.siteId as WAREHOUSE_ID, fr.assetSerialNumber as ASSET_SERIAL_NUMBER
+        FROM tb_WF_Financial_Approval_Request w
+        LEFT JOIN tb_FinancialReport fr 
+            ON (fr.assetName = w.ASSET_ID OR fr.assetSerialNumber = w.ASSET_ID)
+        WHERE 1=1
+        """);
+
+        List<Object> params = new ArrayList<>();
+
+        buildApprovalFilters(sql, params, request);
+
+        sql.append(" ORDER BY w.ID DESC LIMIT ? OFFSET ?");
+        params.add(limit);
+        params.add(offset);
+
+        Query query = entityManager.createNativeQuery(sql.toString());
+
+        for (int i = 0; i < params.size(); i++) {
+            query.setParameter(i + 1, params.get(i));
+        }
+
+        @SuppressWarnings("unchecked")
+        List<Object[]> rows = query.getResultList();
+
+        return convertToMapList(rows);
+    }
+
+    // ====================== BATCH FETCH FOR EXPORT (Cursor-based) ======================
+    private List<Map<String, Object>> fetchApprovalBatch(ApprovalRequest request, Integer lastId, int limit) {
+        StringBuilder sql = new StringBuilder("""
+        SELECT w.ID as WORKFLOW_ID, w.Object_Type, w.ASSET_ID, w.ORIGINAL_STATUS, w.UPDATED_STATUS,
+               w.PROCESS_ID, w.INSERTEDBY as REQUESTER, w.CHANGEDBY as UPDATER, w.COMMENTS,
+               w.INSERTDATE, w.CHANGEDATE,
+               fr.siteId as WAREHOUSE_ID, fr.assetSerialNumber as ASSET_SERIAL_NUMBER
+        FROM tb_WF_Financial_Approval_Request w
+        LEFT JOIN tb_FinancialReport fr 
+            ON (fr.assetName = w.ASSET_ID OR fr.assetSerialNumber = w.ASSET_ID)
+        WHERE 1=1
+        """);
+
+        List<Object> params = new ArrayList<>();
+
+        buildApprovalFilters(sql, params, request);
+
+        if (lastId != null && lastId > 0) {
+            sql.append(" AND w.ID < ?");   // DESC order for cursor
+            params.add(lastId);
+        }
+
+        sql.append(" ORDER BY w.ID DESC LIMIT ?");
+        params.add(limit);
+
+        Query query = entityManager.createNativeQuery(sql.toString());
+
+        for (int i = 0; i < params.size(); i++) {
+            query.setParameter(i + 1, params.get(i));
+        }
+
+        @SuppressWarnings("unchecked")
+        List<Object[]> rows = query.getResultList();
+
+        return convertToMapList(rows);
+    }
+
+
+    // ====================== COMMON FILTER BUILDER (FIXED) ======================
+    private void buildApprovalFilters(StringBuilder sql, List<Object> params, ApprovalRequest request) {
+        // 1. Multi-filters (new flexible way)
+        if (request.getFilters() != null && !request.getFilters().isEmpty()) {
+            for (ApprovalRequest.Filter f : request.getFilters()) {
+                if (f.getColumn() == null || f.getColumn().trim().isEmpty()) continue;
+
+                String col = f.getColumn().trim();
+                String value = f.getValue() != null ? f.getValue().trim() : "";
+                if (value.isEmpty()) continue;
+
+                String operator = f.getOperator() != null ? f.getOperator().name() : "CONTAINS";
+
+                appendFilterCondition(sql, params, col, value, operator);
+            }
+        }
+
+        // 2. Legacy / backward compatibility filters
+        appendSimpleFilter(sql, params, "w.Object_Type", request.getObjectType());
+        appendSimpleFilter(sql, params, "w.ASSET_ID", request.getAssetId());
+        appendSimpleFilter(sql, params, "w.ORIGINAL_STATUS", request.getOriginalStatus());
+        appendSimpleFilter(sql, params, "w.UPDATED_STATUS", request.getUpdatedStatus());
+
+        if (request.getProcessId() != null && !request.getProcessId().isBlank()) {
+            try {
+                sql.append(" AND w.PROCESS_ID = ?");
+                params.add(Integer.parseInt(request.getProcessId()));
+            } catch (Exception ignored) {}
+        }
+
+        if (request.getTeam() != null && !request.getTeam().isBlank()) {
+            String status = switch (request.getTeam().trim()) {
+                case "Financial L1" -> "Pending L1 Approval";
+                case "Financial L2" -> "Pending L2 Approval";
+                case "Financial L3" -> "Pending L3 Approval";
+                default -> null;
+            };
+            if (status != null) {
+                sql.append(" AND LOWER(w.UPDATED_STATUS) = LOWER(?)");
+                params.add(status);
+            }
+        }
+
+        if (request.getStartDate() != null && !request.getStartDate().isBlank()) {
+            sql.append(" AND w.INSERTDATE >= ?");
+            params.add(request.getStartDate() + " 00:00:00");
+        }
+        if (request.getEndDate() != null && !request.getEndDate().isBlank()) {
+            sql.append(" AND w.INSERTDATE <= ?");
+            params.add(request.getEndDate() + " 23:59:59");
+        }
+
+        if (request.getObjectStatus() != null && !request.getObjectStatus().isBlank()) {
+            sql.append("""
+            AND EXISTS (
+                SELECT 1 FROM tb_FinancialReport fr2
+                WHERE (fr2.assetName = w.ASSET_ID OR fr2.assetSerialNumber = w.ASSET_ID)
+                  AND LOWER(fr2.statusFlag) = LOWER(?)
+            )
+            """);
+            params.add(request.getObjectStatus());
+        }
+    }
+
+
+
+    private void appendSimpleFilter(StringBuilder sql, List<Object> params, String column, String value) {
+        if (value != null && !value.trim().isBlank()) {
+            sql.append(" AND LOWER(").append(column).append(") = LOWER(?)");
+            params.add(value.trim());
+        }
+    }
+
+    private void appendFilterCondition(StringBuilder sql, List<Object> params,
+                                               String column, String value, String operator) {
+
+        String colExpression = getColumnExpression(column);  // handles joined columns
+
+        if (colExpression == null) {
+            logger.warn("Invalid filter column: {}", column);
+            return;
+        }
+
+        switch (operator.toUpperCase()) {
+            case "EQUALS":
+                sql.append(" AND LOWER(").append(colExpression).append(") = LOWER(?)");
+                params.add(value);
+                break;
+
+            case "CONTAINS":
+                sql.append(" AND LOWER(").append(colExpression).append(") LIKE LOWER(?)");
+                params.add("%" + value + "%");
+                break;
+
+            case "STARTS_WITH":
+                sql.append(" AND LOWER(").append(colExpression).append(") LIKE LOWER(?)");
+                params.add(value + "%");
+                break;
+
+            case "ENDS_WITH":
+                sql.append(" AND LOWER(").append(colExpression).append(") LIKE LOWER(?)");
+                params.add("%" + value);
+                break;
+
+            case "IS_EMPTY":
+                sql.append(" AND (").append(colExpression).append(" IS NULL OR TRIM(")
+                        .append(colExpression).append(") = '')");
+                break;
+
+            case "IS_NOT_EMPTY":
+                sql.append(" AND ").append(colExpression).append(" IS NOT NULL AND TRIM(")
+                        .append(colExpression).append(") != ''");
+                break;
+
+            default:
+                // fallback to EQUALS
+                sql.append(" AND LOWER(").append(colExpression).append(") = LOWER(?)");
+                params.add(value);
+        }
+    }
+
+    private boolean isValidApprovalColumn(String column) {
+        Set<String> allowed = Set.of(
+                "Object_Type", "ASSET_ID", "ORIGINAL_STATUS", "UPDATED_STATUS",
+                "PROCESS_ID", "INSERTEDBY", "CHANGEDBY", "COMMENTS"
+        );
+        return allowed.contains(column);
+    }
+
+    private String getColumnExpression(String column) {
+        return switch (column.trim().toUpperCase()) {
+            // Main table columns
+            case "WORKFLOW_ID", "ID" -> "w.ID";
+            case "OBJECT_TYPE" -> "w.Object_Type";
+            case "ASSET_ID" -> "w.ASSET_ID";
+            case "ORIGINAL_STATUS" -> "w.ORIGINAL_STATUS";
+            case "UPDATED_STATUS" -> "w.UPDATED_STATUS";
+            case "PROCESS_ID" -> "w.PROCESS_ID";
+            case "REQUESTER", "INSERTEDBY" -> "w.INSERTEDBY";
+            case "UPDATER", "CHANGEDBY" -> "w.CHANGEDBY";
+            case "COMMENTS" -> "w.COMMENTS";
+            case "INSERTDATE" -> "w.INSERTDATE";
+            case "CHANGEDATE" -> "w.CHANGEDATE";
+
+            // Joined table columns
+            case "WAREHOUSE_ID", "SITEID" -> "fr.siteId";
+            case "ASSET_SERIAL_NUMBER" -> "fr.assetSerialNumber";
+
+            default -> null; // invalid column
+        };
+    }
+    // ====================== ROW CONVERTER ======================
+    private List<Map<String, Object>> convertToMapList(List<Object[]> rows) {
+        SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+        List<Map<String, Object>> result = new ArrayList<>();
+
+        for (Object[] row : rows) {
+            Map<String, Object> item = new HashMap<>();
+            item.put("WORKFLOW_ID", row[0]);
+            item.put("OBJECT_TYPE", row[1]);
+            item.put("ASSET_ID", row[2]);
+            item.put("ORIGINAL_STATUS", row[3]);
+            item.put("UPDATED_STATUS", row[4]);
+            item.put("PROCESS_ID", row[5]);
+            item.put("REQUESTER", row[6]);
+            item.put("UPDATER", row[7]);
+            item.put("COMMENTS", row[8]);
+            item.put("INSERTDATE", row[9] != null ? sdf.format(row[9]) : "");
+            item.put("CHANGEDATE", row[10] != null ? sdf.format(row[10]) : "");
+            item.put("WAREHOUSE_ID", row[11]);
+            item.put("ASSET_SERIAL_NUMBER", row[12]);
+            result.add(item);
+        }
+        return result;
     }
 }
