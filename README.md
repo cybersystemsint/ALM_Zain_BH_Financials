@@ -632,8 +632,8 @@ Xmx=2048m (max heap)
 ## 📞 Support & Contact
 
 **Development Team**: ALM Development Team  
-**Organization**: Telkom (Kenya/Bahrain)  
-**Issue Tracking**: Internal Jira/GitHub Issues  
+**Organization**: ALM(Kenya/Bahrain)  
+**Issue Tracking**: GitHub Issues  
 **Documentation**: See additional markdown files in project root
 
 ### Reporting Issues
@@ -658,10 +658,9 @@ When reporting issues, include:
 ## 🙏 Acknowledgments
 
 **Developed by**: ALM Development Team  
-**Supported by**: Telkom IT Infrastructure Team  
-**Database**: Telkom DBA Team  
-**Deployment**: Telkom DevOps Team  
-
+**Supported by**: ALM Support Team  
+**Database**: ALM Development Team 
+**Deployment**: ALM Development Team 
 ---
 
 ## 📋 Changelog
