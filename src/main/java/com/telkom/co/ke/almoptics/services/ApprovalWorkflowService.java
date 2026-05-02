@@ -1062,11 +1062,17 @@ public class ApprovalWorkflowService {
 
     /**
      * Build filters for approval history (no team filter, history focused)
+     * Supports both "filters" and "filterBy" parameter names for flexibility
      */
     private void buildApprovalHistoryFilters(StringBuilder sql, List<Object> params, ApprovalRequest request) {
-        // 1. Multi-filters (new flexible way)
-        if (request.getFilters() != null && !request.getFilters().isEmpty()) {
-            for (ApprovalRequest.Filter f : request.getFilters()) {
+        // 1. Multi-filters (new flexible way) - support both "filters" and "filterBy"
+        List<ApprovalRequest.Filter> filterList = request.getFilters();
+        if (filterList == null || filterList.isEmpty()) {
+            filterList = request.getFilterBy();  // Try alternative name
+        }
+
+        if (filterList != null && !filterList.isEmpty()) {
+            for (ApprovalRequest.Filter f : filterList) {
                 if (f.getColumn() == null || f.getColumn().trim().isEmpty()) continue;
 
                 String col = f.getColumn().trim();

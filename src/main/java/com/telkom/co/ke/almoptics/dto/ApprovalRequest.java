@@ -13,6 +13,7 @@ public class ApprovalRequest {
     private String level;
 
     private List<Filter> filters;
+    private List<Filter> filterBy;           // ← Alias for filters (alternative naming)
 
     private String startdate;
     private String enddate;
@@ -81,6 +82,9 @@ public class ApprovalRequest {
 
     public List<Filter> getFilters() { return filters; }
     public void setFilters(List<Filter> filters) { this.filters = filters; }
+
+    public List<Filter> getFilterBy() { return filterBy; }
+    public void setFilterBy(List<Filter> filterBy) { this.filterBy = filterBy; }
 
     public String getStartdate() { return startdate; }
     public void setStartdate(String startdate) { this.startdate = startdate; }
