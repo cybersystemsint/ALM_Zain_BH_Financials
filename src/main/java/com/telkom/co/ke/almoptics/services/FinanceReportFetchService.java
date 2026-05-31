@@ -1,18 +1,5 @@
 package com.telkom.co.ke.almoptics.services;
 
-import com.telkom.co.ke.almoptics.dto.ApprovalRequest;
-import com.telkom.co.ke.almoptics.dto.PageResult;
-import org.apache.poi.ss.usermodel.Row;
-import org.apache.poi.xssf.streaming.SXSSFSheet;
-import org.apache.poi.xssf.streaming.SXSSFWorkbook;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-
-import javax.persistence.EntityManager;
-import javax.persistence.PersistenceContext;
-import javax.persistence.Query;
 import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.math.BigDecimal;
@@ -24,8 +11,29 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import javax.persistence.EntityManager;
+import javax.persistence.PersistenceContext;
+import javax.persistence.Query;
+
+import org.apache.poi.ss.usermodel.Row;
+import org.apache.poi.xssf.streaming.SXSSFSheet;
+import org.apache.poi.xssf.streaming.SXSSFWorkbook;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import com.telkom.co.ke.almoptics.dto.ApprovalRequest;
+import com.telkom.co.ke.almoptics.dto.PageResult;
+
 /**
  * Fetch / search / export service for the Financial Report grid.
+ *
+ * KEY DESIGN:
+ * - Grand totals (totalCost, totalDepreciation, totalNBV) reflect the ENTIRE dataset
+ *   WITHOUT date range filters. Only regular column filters apply.
+ * - Date range filters (dateFrom/dateTo) ONLY affect paginated results and filtered aggregates.
+ * - This matches user expectations: totals stay constant, but filtered view narrows the data.
  */
 @Service
 public class FinanceReportFetchService {
@@ -33,7 +41,6 @@ public class FinanceReportFetchService {
     private static final Logger logger = LoggerFactory.getLogger(FinanceReportFetchService.class);
 
     private static final int EXPORT_BATCH_SIZE = 100_000;
-    // EXPORT_LIMIT removed - no more artificial cap on exports
 
     /**
      * Output-column order for the API rows AND the CSV/XLSX exports.
@@ -107,7 +114,7 @@ public class FinanceReportFetchService {
         result.setTotalPages((int) Math.ceil((double) total / size));
         result.setPage(page);
         result.setSize(size);
-        result.setdata(data);
+        result.setData(data);
         return result;
     }
 
@@ -125,7 +132,7 @@ public class FinanceReportFetchService {
         long t0 = System.currentTimeMillis();
 
         while (true) {
-            int batch = EXPORT_BATCH_SIZE;   // No limit applied
+            int batch = EXPORT_BATCH_SIZE;
 
             List<Map<String, Object>> rows = fetchBatchAfter(request, lastId, batch);
             if (rows.isEmpty()) break;
@@ -173,7 +180,7 @@ public class FinanceReportFetchService {
             long t0 = System.currentTimeMillis();
 
             while (true) {
-                int batch = EXPORT_BATCH_SIZE;   // No limit applied
+                int batch = EXPORT_BATCH_SIZE;
 
                 List<Map<String, Object>> rows = fetchBatchAfter(request, lastId, batch);
                 if (rows.isEmpty()) break;
@@ -207,13 +214,13 @@ public class FinanceReportFetchService {
     }
 
     // ==================================================================
-    // PRIVATE HELPERS (unchanged except removal of limit logic)
+    // PRIVATE HELPERS
     // ==================================================================
 
     private List<Map<String, Object>> fetchPage(ApprovalRequest request, int offset, int limit) {
         StringBuilder sql = new StringBuilder(SELECT_CLAUSE);
         List<Object> params = new ArrayList<>();
-        applyFilters(sql, params, request);
+        applyFilters(sql, params, request, true);  // Include date range
         sql.append(" ORDER BY fr.Id DESC LIMIT ? OFFSET ?");
         params.add(limit);
         params.add(offset);
@@ -223,7 +230,7 @@ public class FinanceReportFetchService {
     private List<Map<String, Object>> fetchBatchAfter(ApprovalRequest request, Long lastId, int limit) {
         StringBuilder sql = new StringBuilder(SELECT_CLAUSE);
         List<Object> params = new ArrayList<>();
-        applyFilters(sql, params, request);
+        applyFilters(sql, params, request, true);  // Include date range
 
         if (lastId != null && lastId > 0) {
             sql.append(" AND fr.Id > ?");
@@ -238,7 +245,7 @@ public class FinanceReportFetchService {
     private long countMatching(ApprovalRequest request) {
         StringBuilder sql = new StringBuilder("SELECT COUNT(*) FROM tb_FinancialReport fr WHERE 1=1 ");
         List<Object> params = new ArrayList<>();
-        applyFilters(sql, params, request);
+        applyFilters(sql, params, request, true);  // Include date range
         Query q = entityManager.createNativeQuery(sql.toString());
         for (int i = 0; i < params.size(); i++) {
             q.setParameter(i + 1, params.get(i));
@@ -302,7 +309,7 @@ public class FinanceReportFetchService {
         item.put("DepreciationCode",          row[26]);
         item.put("UsefulLifeMonths",          row[27]);
         item.put("VendorName",                row[28]);
-        item.put("VendorNumber",                row[29]);
+        item.put("VendorNumber",              row[29]);
         item.put("ProjectNumber",             row[30]);
         item.put("DateOfService",             row[31]);
         item.put("OldFA_Category",            row[32]);
@@ -336,28 +343,67 @@ public class FinanceReportFetchService {
         }
     }
 
+    /**
+     * Apply filters to the SQL query, including both column filters and date range filters.
+     * This is the default behavior for paginated results.
+     *
+     * @param sql               StringBuilder to append conditions to
+     * @param params            Parameter list
+     * @param request           The request containing filters
+     */
     private void applyFilters(StringBuilder sql, List<Object> params, ApprovalRequest request) {
+        applyFilters(sql, params, request, true);
+    }
+
+    /**
+     * Apply filters to the SQL query, optionally including ALL filters.
+     *
+     * <p><b>IMPORTANT DESIGN DECISION:</b></p>
+     * <p>When {@code includeAllFilters=false} (used for grand totals calculation),
+     * ALL filters are excluded:</p>
+     * <ul>
+     *   <li>Column filters from {@code filters[]} array</li>
+     *   <li>Date range filters ({@code dateFrom}/{@code dateTo})</li>
+     * </ul>
+     *
+     * <p>This ensures grand totals (totalCost, totalDepreciation, totalNBV) always reflect
+     * the ENTIRE dataset, regardless of what filters are applied to the paginated view.
+     * Only paginated results, filtered aggregates, and exports include filters.</p>
+     *
+     * @param sql               StringBuilder to append conditions to
+     * @param params            Parameter list
+     * @param request           The request containing filters
+     * @param includeAllFilters If true, apply ALL filters (column + date range) for paginated results.
+     *                          If false, skip ALL filters (for grand totals calculation).
+     */
+    private void applyFilters(StringBuilder sql, List<Object> params, ApprovalRequest request, 
+                             boolean includeAllFilters) {
         if (request == null) return;
 
-        if (request.getFilters() != null && !request.getFilters().isEmpty()) {
-            for (ApprovalRequest.Filter f : request.getFilters()) {
-                if (f == null || f.getColumn() == null) continue;
+        // ------------------------------------------------------------------
+        // Apply regular column-based filters (from filters[] array)
+        // ------------------------------------------------------------------
+        if (includeAllFilters) {
+            if (request.getFilters() != null && !request.getFilters().isEmpty()) {
+                for (ApprovalRequest.Filter f : request.getFilters()) {
+                    if (f == null || f.getColumn() == null) continue;
 
-                String column = f.getColumn().trim();
-                String value  = f.getValue() != null ? f.getValue().trim() : "";
-                String op     = f.getOperator() != null ? f.getOperator().name() : "CONTAINS";
+                    String column = f.getColumn().trim();
+                    String value  = f.getValue() != null ? f.getValue().trim() : "";
+                    String op     = f.getOperator() != null ? f.getOperator().name() : "CONTAINS";
 
-                String colExpr = resolveColumn(column);
-                if (colExpr == null) {
-                    logger.warn("Ignoring filter on unknown FR column: {}", column);
-                    continue;
+                    String colExpr = resolveColumn(column);
+                    if (colExpr == null) {
+                        logger.warn("Ignoring filter on unknown FR column: {}", column);
+                        continue;
+                    }
+                    appendCondition(sql, params, colExpr, value, op);
                 }
-                appendCondition(sql, params, colExpr, value, op);
             }
         }
 
         // ------------------------------------------------------------------
-        // Date range filters for FINANCIAL REPORT fetch endpoint
+        // Apply date range filters (dateFrom/dateTo)
         // ------------------------------------------------------------------
         // dateFrom/dateTo → fr.DateOfService (the FR's "as-of" accounting date)
         //
@@ -371,14 +417,20 @@ public class FinanceReportFetchService {
         //
         // NOTE: startDate/endDate are Finance Approval Specific fields and
         // should NOT be used here. This endpoint only uses dateFrom/dateTo.
+        //
+        // IMPORTANT: Date range filters are ONLY applied when includeAllFilters=true.
+        // For grand totals calculation, includeAllFilters=false so the totals
+        // reflect the ENTIRE dataset, not just the filtered subset.
         // ------------------------------------------------------------------
-        if (notBlank(request.getDateFrom())) {
-            sql.append(" AND fr.DateOfService >= ?");
-            params.add(normaliseDate(request.getDateFrom()));
-        }
-        if (notBlank(request.getDateTo())) {
-            sql.append(" AND fr.DateOfService <= ?");
-            params.add(normaliseDate(request.getDateTo()));
+        if (includeAllFilters) {
+            if (notBlank(request.getDateFrom())) {
+                sql.append(" AND fr.DateOfService >= ?");
+                params.add(normaliseDate(request.getDateFrom()));
+            }
+            if (notBlank(request.getDateTo())) {
+                sql.append(" AND fr.DateOfService <= ?");
+                params.add(normaliseDate(request.getDateTo()));
+            }
         }
     }
 
@@ -513,7 +565,6 @@ public class FinanceReportFetchService {
             case "itembarcode":                 return "fr.ItemBarCode";
             case "rfid":                        return "fr.RFID";
             case "invoicenumber":               return "fr.InvoiceNumber";
-            // Add more mappings here if needed in future
             default:                            return null;
         }
     }
@@ -550,10 +601,18 @@ public class FinanceReportFetchService {
         return s != null && !s.trim().isEmpty();
     }
 
+    // ==================================================================
+    // GRAND TOTALS & AGGREGATES
+    // ==================================================================
 
     /**
      * Returns grand totals (totalCost, totalDepreciation, totalNBV)
-     * for the ENTIRE filtered dataset.
+     * for the ENTIRE dataset, WITHOUT date range filters.
+     *
+     * <p>The date range filters (dateFrom/dateTo) are explicitly excluded
+     * from the grand totals calculation so the totals always reflect the
+     * full dataset. Paginated results and filtered aggregates still apply
+     * the date filters.</p>
      *
      * <p>Two paths:</p>
      * <ul>
@@ -584,7 +643,7 @@ public class FinanceReportFetchService {
         );
 
         List<Object> params = new ArrayList<>();
-        applyFilters(sql, params, request);
+        applyFilters(sql, params, request, false);  // ← NO filters (column or date range) for grand totals
 
         Query q = entityManager.createNativeQuery(sql.toString());
         for (int i = 0; i < params.size(); i++) {
@@ -598,6 +657,9 @@ public class FinanceReportFetchService {
         BigDecimal totalNBV = totalCost.subtract(totalDepreciation)
                 .setScale(3, RoundingMode.HALF_UP);
 
+        logger.info("FR grand totals (no filters): totalCost={} totalDep={} totalNBV={}",
+                totalCost, totalDepreciation, totalNBV);
+
         Map<String, BigDecimal> totals = new HashMap<>();
         totals.put("totalCost", totalCost);
         totals.put("totalDepreciation", totalDepreciation);
@@ -608,8 +670,18 @@ public class FinanceReportFetchService {
     /**
      * Cursor-streaming aggregator that recomputes each row's
      * AccumulatedDepreciation as of the snapshot date, then sums.
+     * Date range filters are excluded from grand totals.
      *
      * <p>The stream uses the same {@link #fetchBatchAfter} cursor (id ASC)
+     * the exports use, so memory stays bounded at one batch
+     * ({@code EXPORT_BATCH_SIZE} rows) regardless of dataset size.</p>
+     */
+    /**
+     * Cursor-streaming aggregator that recomputes each row's
+     * AccumulatedDepreciation as of the snapshot date, then sums.
+     * ALL filters (column and date range) are excluded from grand totals.
+     *
+     * <p>The stream uses the same {@link #fetchBatchAfterNoFilters} cursor (id ASC)
      * the exports use, so memory stays bounded at one batch
      * ({@code EXPORT_BATCH_SIZE} rows) regardless of dataset size.</p>
      */
@@ -621,7 +693,7 @@ public class FinanceReportFetchService {
         int scanned = 0;
 
         while (true) {
-            List<Map<String, Object>> rows = fetchBatchAfter(request, lastId, EXPORT_BATCH_SIZE);
+            List<Map<String, Object>> rows = fetchBatchAfterNoFilters(request, lastId, EXPORT_BATCH_SIZE);
             if (rows.isEmpty()) break;
             applyAsOfDateMath(rows, asOf);
             for (Map<String, Object> r : rows) {
@@ -633,14 +705,34 @@ public class FinanceReportFetchService {
             lastId = ((Number) rows.get(rows.size() - 1).get("ID")).longValue();
         }
         BigDecimal totalNBV = totalCost.subtract(totalDep).setScale(3, RoundingMode.HALF_UP);
-        logger.info("FR as-of-date grand totals: scanned={} asOf={} took={}ms",
-                scanned, asOf, System.currentTimeMillis() - t0);
+        logger.info("FR as-of-date grand totals (no filters): scanned={} asOf={} took={}ms totalCost={} totalDep={}",
+                scanned, asOf, System.currentTimeMillis() - t0, totalCost, totalDep);
 
         Map<String, BigDecimal> totals = new HashMap<>();
         totals.put("totalCost", totalCost.setScale(3, RoundingMode.HALF_UP));
         totals.put("totalDepreciation", totalDep.setScale(3, RoundingMode.HALF_UP));
         totals.put("totalNBV", totalNBV);
         return totals;
+    }
+
+    /**
+     * Helper to fetch batch without ANY filters (column filters or date range).
+     * Used only in aggregateTotalsAsOfDate for grand totals calculation.
+     * This ensures grand totals reflect the ENTIRE dataset.
+     */
+    private List<Map<String, Object>> fetchBatchAfterNoFilters(ApprovalRequest request, Long lastId, int limit) {
+        StringBuilder sql = new StringBuilder(SELECT_CLAUSE);
+        List<Object> params = new ArrayList<>();
+        applyFilters(sql, params, request, false);  // ← NO filters at all
+
+        if (lastId != null && lastId > 0) {
+            sql.append(" AND fr.Id > ?");
+            params.add(lastId);
+        }
+
+        sql.append(" ORDER BY fr.Id ASC LIMIT ?");
+        params.add(limit);
+        return runSelect(sql.toString(), params);
     }
 
     // ==================================================================
@@ -655,10 +747,6 @@ public class FinanceReportFetchService {
     //   accDep         = monthlyDep × monthsActive
     //                  ≤ (InitialCost − SalvageValue)
     //   netCost        = max(InitialCost − accDep, SalvageValue)
-    //
-    // We mutate the row map in place — the controller / exporter is not
-    // aware that the values were recomputed; from their perspective these
-    // are just the row's depreciation values.
     // ==================================================================
 
     /** Returns the snapshot date if dateTo is supplied, else null. */
@@ -754,6 +842,7 @@ public class FinanceReportFetchService {
 
     /**
      * Calculates aggregates ONLY for the current page (filteredCost, filteredDepreciation, filteredNBV)
+     * These reflect the paginated results WITH date range filters applied.
      */
     public Map<String, BigDecimal> calculatePageAggregates(List<Map<String, Object>> pageData) {
         BigDecimal filteredCost = BigDecimal.ZERO;
@@ -776,14 +865,13 @@ public class FinanceReportFetchService {
     }
 
     /**
-     * Safe conversion from any numeric value to BigDecimal (Java 15 compatible)
+     * Safe conversion from any numeric value to BigDecimal 
      */
     public BigDecimal convertToBigDecimal(Object value) {
         if (value == null) {
             return BigDecimal.ZERO.setScale(3, RoundingMode.HALF_UP);
         }
 
-        // Java 15 compatible instanceof
         if (value instanceof BigDecimal) {
             return ((BigDecimal) value).setScale(3, RoundingMode.HALF_UP);
         }

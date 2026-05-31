@@ -76,7 +76,7 @@ public class WriteOffReportFetchService {
         result.setTotalPages((int) Math.ceil((double) total / size));
         result.setPage(page);
         result.setSize(size);
-        result.setdata(data);
+        result.setData(data);
         return result;
     }
 

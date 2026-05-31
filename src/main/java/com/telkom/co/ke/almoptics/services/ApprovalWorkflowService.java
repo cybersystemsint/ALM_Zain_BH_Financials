@@ -40,8 +40,6 @@ import javax.persistence.Query;
 import javax.persistence.criteria.Predicate;
 import javax.persistence.criteria.Root;
 import javax.persistence.criteria.Subquery;
-import java.util.ArrayList;
-import java.util.List;
 
 
 
@@ -996,7 +994,7 @@ public class ApprovalWorkflowService {
         result.setTotalPages((int) Math.ceil((double) totalElements / size));
         result.setPage(page);
         result.setSize(size);
-        result.setdata(data);
+        result.setData(data);
 
         return result;
     }
@@ -1292,7 +1290,7 @@ public class ApprovalWorkflowService {
         result.setTotalPages((int) Math.ceil((double) totalElements / size));
         result.setPage(page);
         result.setSize(size);
-        result.setdata(data);
+        result.setData(data);
 
         return result;
     }

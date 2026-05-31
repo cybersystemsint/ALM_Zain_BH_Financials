@@ -1,65 +1,89 @@
 package com.telkom.co.ke.almoptics.controllers;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.telkom.co.ke.almoptics.dto.ApprovalRequest;
-import com.telkom.co.ke.almoptics.dto.PageResult;
-import com.telkom.co.ke.almoptics.entities.WriteOffReport;
-import com.telkom.co.ke.almoptics.entities.tb_FinancialReport;
-import com.telkom.co.ke.almoptics.entities.tb_ApprovalWorkflow;
-import com.telkom.co.ke.almoptics.models.ApprovalWorkflow;
-import com.telkom.co.ke.almoptics.repository.*;
-import com.telkom.co.ke.almoptics.services.FinanceReportFetchService;
-import com.telkom.co.ke.almoptics.services.FinancialReportService;
-import com.telkom.co.ke.almoptics.services.ApprovalWorkflowService;
-import com.telkom.co.ke.almoptics.services.InventorySyncService;
-import com.telkom.co.ke.almoptics.services.WriteOffReportService;
-import com.telkom.co.ke.almoptics.services.AuditLogService;
-import com.telkom.co.ke.almoptics.services.UnmappedReportFetchService;
-import com.telkom.co.ke.almoptics.services.WriteOffReportFetchService;
-import com.telkom.co.ke.almoptics.schedulers.FinancialSyncScheduler;
-import org.apache.commons.csv.CSVParser;
-import org.apache.commons.csv.CSVRecord;
-
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
-import org.springframework.transaction.annotation.Propagation;
-import org.springframework.transaction.annotation.Transactional;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import java.io.*;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.security.Principal;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
-import java.time.*;
-
-import org.apache.commons.csv.CSVFormat;
-import org.apache.commons.csv.CSVPrinter;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageRequest;
-import org.springframework.data.domain.Pageable;
-import org.springframework.data.domain.Sort;
-import org.springframework.web.multipart.MultipartFile;
-
-import java.security.Principal;
+import java.time.LocalDate;
+import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
-import java.util.*;
-
-import org.springframework.data.jpa.domain.Specification;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
 
 import javax.persistence.EntityManager;
 import javax.persistence.PersistenceContext;
 import javax.persistence.criteria.Predicate;
 import javax.servlet.http.HttpServletResponse;
-import java.util.ArrayList;
+
+import org.apache.commons.csv.CSVFormat;
+import org.apache.commons.csv.CSVParser;
+import org.apache.commons.csv.CSVPrinter;
+import org.apache.commons.csv.CSVRecord;
 import org.apache.poi.ss.usermodel.Row;
 import org.apache.poi.ss.usermodel.Sheet;
 import org.apache.poi.xssf.streaming.SXSSFWorkbook;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.bind.annotation.CrossOrigin;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.telkom.co.ke.almoptics.dto.ApprovalRequest;
+import com.telkom.co.ke.almoptics.dto.PageResult;
+import com.telkom.co.ke.almoptics.entities.WriteOffReport;
+import com.telkom.co.ke.almoptics.entities.tb_ApprovalWorkflow;
+import com.telkom.co.ke.almoptics.entities.tb_FinancialReport;
+import com.telkom.co.ke.almoptics.models.ApprovalWorkflow;
+import com.telkom.co.ke.almoptics.repository.ApprovalWorkflowRepository;
+import com.telkom.co.ke.almoptics.repository.FinancialReportRepo;
+import com.telkom.co.ke.almoptics.repository.UnmappedActiveInventoryRepository;
+import com.telkom.co.ke.almoptics.repository.UnmappedITInventoryRepository;
+import com.telkom.co.ke.almoptics.repository.UnmappedLicenseRepository;
+import com.telkom.co.ke.almoptics.repository.UnmappedPassiveInventoryRepository;
+import com.telkom.co.ke.almoptics.schedulers.FinancialSyncScheduler;
+import com.telkom.co.ke.almoptics.services.ApprovalWorkflowService;
+import com.telkom.co.ke.almoptics.services.AuditLogService;
+import com.telkom.co.ke.almoptics.services.FinanceReportFetchService;
+import com.telkom.co.ke.almoptics.services.FinancialReportService;
+import com.telkom.co.ke.almoptics.services.InventorySyncService;
+import com.telkom.co.ke.almoptics.services.UnmappedReportFetchService;
+import com.telkom.co.ke.almoptics.services.WriteOffReportFetchService;
+import com.telkom.co.ke.almoptics.services.WriteOffReportService;
 
 @RestController
 @RequestMapping("/api/financial")
@@ -2202,11 +2226,11 @@ public class FinancialReportController {
 
             Map<String, BigDecimal> grandTotals = financeReportFetchService.getAggregateTotals(request);
             Map<String, BigDecimal> pageAggregates = financeReportFetchService.calculatePageAggregates(
-                    pageResult.getdata());
+                    pageResult.getData());
 
             Map<String, Object> result = new HashMap<>();
 
-            result.put("reports", pageResult.getdata());
+            result.put("reports", pageResult.getData());
             result.put("currentPage", pageResult.getPage());
             result.put("totalItems", pageResult.getTotalElements());
             result.put("totalPages", pageResult.getTotalPages());
@@ -2289,7 +2313,7 @@ public class FinancialReportController {
             PageResult<Map<String, Object>> pageResult = unmappedReportFetchService.searchUnmappedActive(request);
 
             Map<String, Object> result = new HashMap<>();
-            result.put("reports", pageResult.getdata());
+            result.put("reports", pageResult.getData());
             result.put("currentPage", pageResult.getPage());
             result.put("totalItems", pageResult.getTotalElements());
             result.put("totalPages", pageResult.getTotalPages());
@@ -2362,7 +2386,7 @@ public class FinancialReportController {
             PageResult<Map<String, Object>> pageResult = unmappedReportFetchService.searchUnmappedPassive(request);
 
             Map<String, Object> result = new HashMap<>();
-            result.put("reports", pageResult.getdata());
+            result.put("reports", pageResult.getData());
             result.put("currentPage", pageResult.getPage());
             result.put("totalItems", pageResult.getTotalElements());
             result.put("totalPages", pageResult.getTotalPages());
@@ -2435,7 +2459,7 @@ public class FinancialReportController {
             PageResult<Map<String, Object>> pageResult = unmappedReportFetchService.searchUnmappedIT(request);
 
             Map<String, Object> result = new HashMap<>();
-            result.put("reports", pageResult.getdata());
+            result.put("reports", pageResult.getData());
             result.put("currentPage", pageResult.getPage());
             result.put("totalItems", pageResult.getTotalElements());
             result.put("totalPages", pageResult.getTotalPages());
@@ -2508,7 +2532,7 @@ public class FinancialReportController {
             PageResult<Map<String, Object>> pageResult = writeOffReportFetchService.searchWriteOff(request);
 
             Map<String, Object> result = new HashMap<>();
-            result.put("reports", pageResult.getdata());
+            result.put("reports", pageResult.getData());
             result.put("currentPage", pageResult.getPage());
             result.put("totalItems", pageResult.getTotalElements());
             result.put("totalPages", pageResult.getTotalPages());
